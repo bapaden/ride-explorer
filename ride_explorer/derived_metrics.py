@@ -37,30 +37,32 @@ def _extract_numeric_series(
 ) -> DerivedSeries:
     """Convert a ``RecordPoint`` attribute stream into aligned NumPy arrays.
 
-    Only records that contain both a timestamp and the requested attribute are
-    kept; missing entries are skipped entirely. The timestamps are shifted to
-    start at zero seconds to improve numerical stability for finite differences,
-    using ``time_origin`` when provided or the first valid timestamp otherwise.
+    The parser aligns all streams ahead of time, so this helper expects every
+    record to contain a timestamp and the requested attribute. If any values are
+    missing, an empty series is returned to signal that the derivative cannot be
+    computed reliably.
     """
 
-    times: list[float] = []
-    values: list[float] = []
+    if not records:
+        return DerivedSeries(times=np.array([]), values=np.array([]))
 
-    first_timestamp: float | None = time_origin
-    for record in records:
-        ts = record.timestamp
-        value = getattr(record, attribute)
-        if ts is None or value is None:
-            # Drop records that cannot contribute to the derivative calculation.
-            continue
+    times = np.array(
+        [record.timestamp.timestamp() for record in records if record.timestamp],
+        dtype=float,
+    )
+    values = np.array(
+        [
+            np.nan if getattr(record, attribute) is None else float(getattr(record, attribute))
+            for record in records
+        ],
+        dtype=float,
+    )
 
-        if first_timestamp is None:
-            first_timestamp = ts.timestamp()
+    if times.size != len(records) or np.any(np.isnan(values)):
+        return DerivedSeries(times=np.array([]), values=np.array([]))
 
-        times.append(ts.timestamp() - first_timestamp)
-        values.append(float(value))
-
-    return DerivedSeries(times=np.asarray(times), values=np.asarray(values))
+    start = time_origin if time_origin is not None else times[0]
+    return DerivedSeries(times=times - start, values=values)
 
 
 def compute_climbing_rate(
@@ -175,10 +177,8 @@ def compute_mechanical_power(
     * ``acceleration_power``: ``m * acceleration * speed`` to change kinetic
       energy (speed already in m/s from FIT data).
 
-    The climbing component is interpolated onto the acceleration time grid so
-    the resulting series stays aligned with the speed samples used for the
-    kinetic term. Values outside the altitude coverage window are discarded to
-    avoid extrapolating derivatives.
+    Streams are assumed to be time-aligned by :mod:`ride_explorer.fit_parser`, so
+    both components are evaluated on the shared record timeline.
 
     Parameters
     ----------
@@ -203,11 +203,15 @@ def compute_mechanical_power(
     if system_mass_kg <= 0:
         raise ValueError("system_mass_kg must be positive")
 
-    # Acceleration uses the speed stream; the speed samples define the time grid
-    # for the final power calculation.
     speed_series = _extract_numeric_series(
         records, "speed", time_origin=time_origin
     )
+    if speed_series.times.size == 0:
+        empty = DerivedSeries(times=np.array([]), values=np.array([]))
+        return {"climbing_power": empty, "acceleration_power": empty}
+
+    # Acceleration uses the speed stream; the speed samples define the time grid
+    # for the final power calculation.
     accel_series = compute_acceleration(records, time_origin=time_origin)
     climb_series = compute_climbing_rate(records, time_origin=time_origin)
 
@@ -215,26 +219,14 @@ def compute_mechanical_power(
         empty = DerivedSeries(times=np.array([]), values=np.array([]))
         return {"climbing_power": empty, "acceleration_power": empty}
 
-    accel_times = accel_series.times
-
-    # Keep only acceleration timestamps that lie within the altitude coverage
-    # window to avoid extrapolating the climbing derivative.
-    in_altitude_range = (accel_times >= climb_series.times[0]) & (
-        accel_times <= climb_series.times[-1]
-    )
-    if not np.any(in_altitude_range):
+    if not np.array_equal(accel_series.times, climb_series.times):
         empty = DerivedSeries(times=np.array([]), values=np.array([]))
         return {"climbing_power": empty, "acceleration_power": empty}
 
-    aligned_times = accel_times[in_altitude_range]
-    aligned_speed = speed_series.values[in_altitude_range]
-    aligned_accel = accel_series.values[in_altitude_range]
-
-    # Interpolate the climbing rate onto the acceleration timeline so both
-    # components can be evaluated sample-by-sample.
-    aligned_climb_rate = np.interp(
-        aligned_times, climb_series.times, climb_series.values
-    )
+    aligned_times = accel_series.times
+    aligned_speed = speed_series.values
+    aligned_accel = accel_series.values
+    aligned_climb_rate = climb_series.values
 
     climbing_power = system_mass_kg * GRAVITY_M_PER_S2 * aligned_climb_rate
     acceleration_power = system_mass_kg * aligned_accel * aligned_speed

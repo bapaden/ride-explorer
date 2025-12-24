@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
+import numpy as np
 from fitparse import FitFile
 
 
@@ -146,6 +147,190 @@ def _parse_records(fit: FitFile) -> List[RecordPoint]:
     return records
 
 
+def _build_time_grid(records: Sequence[RecordPoint]) -> list[datetime]:
+    """Return sorted, de-duplicated timestamps from a record stream."""
+
+    seen: set[float] = set()
+    grid: list[datetime] = []
+
+    for record in records:
+        ts = record.timestamp
+        if ts is None:
+            continue
+        ts_seconds = ts.timestamp()
+        if ts_seconds in seen:
+            continue
+        seen.add(ts_seconds)
+        grid.append(ts)
+
+    return sorted(grid, key=lambda ts: ts.timestamp())
+
+
+def _interpolate_numeric_stream(
+    records: Sequence[RecordPoint],
+    attribute: str,
+    target_seconds: np.ndarray,
+    *,
+    round_to_int: bool = False,
+) -> np.ndarray:
+    """Interpolate a numeric record attribute onto ``target_seconds``."""
+
+    source_times: list[float] = []
+    source_values: list[float] = []
+
+    for record in records:
+        ts = record.timestamp
+        value = getattr(record, attribute)
+        if ts is None or value is None:
+            continue
+        source_times.append(ts.timestamp())
+        source_values.append(float(value))
+
+    if not source_times:
+        return np.full_like(target_seconds, np.nan, dtype=float)
+
+    times = np.asarray(source_times, dtype=float)
+    values = np.asarray(source_values, dtype=float)
+    order = np.argsort(times)
+    times = times[order]
+    values = values[order]
+    times, unique_indices = np.unique(times, return_index=True)
+    values = values[unique_indices]
+
+    if times.size == 1:
+        filled = np.full_like(target_seconds, values[0], dtype=float)
+    else:
+        filled = np.interp(
+            target_seconds,
+            times,
+            values,
+            left=values[0],
+            right=values[-1],
+        )
+
+    if round_to_int:
+        return np.rint(filled)
+    return filled
+
+
+def _interpolate_positions(
+    records: Sequence[RecordPoint], target_seconds: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Interpolate latitude and longitude streams onto ``target_seconds``."""
+
+    source_times: list[float] = []
+    lats: list[float] = []
+    lons: list[float] = []
+
+    for record in records:
+        ts = record.timestamp
+        position = record.position
+        if ts is None or position is None:
+            continue
+        lat, lon = position
+        if lat is None or lon is None:
+            continue
+
+        source_times.append(ts.timestamp())
+        lats.append(lat)
+        lons.append(lon)
+
+    if not source_times:
+        empty = np.full_like(target_seconds, np.nan, dtype=float)
+        return empty, empty
+
+    times = np.asarray(source_times, dtype=float)
+    lat_values = np.asarray(lats, dtype=float)
+    lon_values = np.asarray(lons, dtype=float)
+    order = np.argsort(times)
+    times = times[order]
+    lat_values = lat_values[order]
+    lon_values = lon_values[order]
+    times, unique_indices = np.unique(times, return_index=True)
+    lat_values = lat_values[unique_indices]
+    lon_values = lon_values[unique_indices]
+
+    if times.size == 1:
+        lat_interp = np.full_like(target_seconds, lat_values[0], dtype=float)
+        lon_interp = np.full_like(target_seconds, lon_values[0], dtype=float)
+    else:
+        lat_interp = np.interp(
+            target_seconds, times, lat_values, left=lat_values[0], right=lat_values[-1]
+        )
+        lon_interp = np.interp(
+            target_seconds, times, lon_values, left=lon_values[0], right=lon_values[-1]
+        )
+
+    return lat_interp, lon_interp
+
+
+def _cast_value(value: float, *, to_int: bool = False):
+    if np.isnan(value):
+        return None
+    if to_int:
+        return int(round(value))
+    return float(value)
+
+
+def _align_records(records: Sequence[RecordPoint]) -> list[RecordPoint]:
+    """Resample all record fields onto a common timestamp grid.
+
+    The returned records contain a value for every field at each timestamp,
+    using interpolation (with edge values held constant) for attributes that do
+    not report on every FIT record. Streams that are entirely missing remain
+    unset (``None``) across all records.
+    """
+
+    time_grid = _build_time_grid(records)
+    if not time_grid:
+        return []
+
+    target_seconds = np.asarray(
+        [ts.timestamp() for ts in time_grid], dtype=float
+    )
+
+    altitude = _interpolate_numeric_stream(records, "altitude", target_seconds)
+    distance = _interpolate_numeric_stream(records, "distance", target_seconds)
+    speed = _interpolate_numeric_stream(records, "speed", target_seconds)
+    heart_rate = _interpolate_numeric_stream(
+        records, "heart_rate", target_seconds, round_to_int=True
+    )
+    cadence = _interpolate_numeric_stream(
+        records, "cadence", target_seconds, round_to_int=True
+    )
+    temperature = _interpolate_numeric_stream(
+        records, "temperature", target_seconds
+    )
+    power = _interpolate_numeric_stream(
+        records, "power", target_seconds, round_to_int=True
+    )
+    latitudes, longitudes = _interpolate_positions(records, target_seconds)
+
+    aligned: list[RecordPoint] = []
+    for idx, timestamp in enumerate(time_grid):
+        lat = latitudes[idx]
+        lon = longitudes[idx]
+        position = (
+            (lat, lon) if not np.isnan(lat) and not np.isnan(lon) else None
+        )
+
+        aligned.append(
+            RecordPoint(
+                timestamp=timestamp,
+                position=position,
+                altitude=_cast_value(altitude[idx]),
+                distance=_cast_value(distance[idx]),
+                speed=_cast_value(speed[idx]),
+                heart_rate=_cast_value(heart_rate[idx], to_int=True),
+                cadence=_cast_value(cadence[idx], to_int=True),
+                temperature=_cast_value(temperature[idx]),
+                power=_cast_value(power[idx], to_int=True),
+            )
+        )
+
+    return aligned
+
+
 def _parse_laps(fit: FitFile) -> List[Lap]:
     laps: List[Lap] = []
     for message in fit.get_messages("lap"):
@@ -198,7 +383,13 @@ def _parse_sessions(fit: FitFile) -> List[Session]:
 
 
 def parse_cycling_fit(path: Path | str) -> CyclingFitData:
-    """Parse a Garmin cycling FIT file into a structured object."""
+    """Parse a Garmin cycling FIT file into a structured, aligned object.
+
+    All numeric record streams are resampled onto the shared timestamp grid
+    emitted by the FIT ``record`` messages. Missing samples are filled via
+    linear interpolation with edge values held constant so downstream consumers
+    can assume fields are present and time aligned.
+    """
 
     fit_file = FitFile(str(path))
     fit_file.parse()
@@ -213,5 +404,5 @@ def parse_cycling_fit(path: Path | str) -> CyclingFitData:
         devices=devices,
         sessions=sessions,
         laps=laps,
-        records=records,
+        records=_align_records(records),
     )

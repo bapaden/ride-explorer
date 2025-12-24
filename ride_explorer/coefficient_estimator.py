@@ -53,44 +53,24 @@ class PowerBalanceData:
         return int(self.crank_power.size)
 
 
-def _first_timestamp(records: Sequence[RecordPoint]) -> float:
-    for record in records:
-        if record.timestamp is not None:
-            return record.timestamp.timestamp()
-    raise ValueError("No timestamps available in records")
+def _timestamp_offsets(records: Sequence[RecordPoint]) -> np.ndarray:
+    timestamps = np.array(
+        [record.timestamp.timestamp() for record in records if record.timestamp],
+        dtype=float,
+    )
+    if timestamps.size != len(records):
+        raise ValueError("All records must contain timestamps after parsing")
+    return timestamps - timestamps[0]
 
 
-def _extract_numeric_series(
-    records: Sequence[RecordPoint], attribute: str, time_origin: float
-) -> tuple[np.ndarray, np.ndarray]:
-    times: list[float] = []
-    values: list[float] = []
-
-    for record in records:
-        ts = record.timestamp
-        value = getattr(record, attribute)
-        if ts is None or value is None:
-            continue
-
-        times.append(ts.timestamp() - time_origin)
-        values.append(float(value))
-
-    return np.asarray(times), np.asarray(values)
-
-
-def _interpolate_series(
-    source_times: np.ndarray, source_values: np.ndarray, target_times: np.ndarray
-) -> np.ndarray:
-    if source_times.size == 0:
-        return np.full_like(target_times, np.nan, dtype=float)
-
-    in_range = (target_times >= source_times[0]) & (target_times <= source_times[-1])
-    if not np.any(in_range):
-        return np.full_like(target_times, np.nan, dtype=float)
-
-    resampled = np.full_like(target_times, np.nan, dtype=float)
-    resampled[in_range] = np.interp(target_times[in_range], source_times, source_values)
-    return resampled
+def _aligned_attribute(records: Sequence[RecordPoint], attribute: str) -> np.ndarray:
+    return np.asarray(
+        [
+            np.nan if getattr(record, attribute) is None else float(getattr(record, attribute))
+            for record in records
+        ],
+        dtype=float,
+    )
 
 
 def prepare_power_balance_data(
@@ -120,56 +100,57 @@ def prepare_power_balance_data(
 
     if system_mass_kg <= 0:
         raise ValueError("system_mass_kg must be positive")
+    if not records:
+        raise ValueError("records must contain at least one entry")
 
-    time_origin = _first_timestamp(records)
+    first_timestamp = records[0].timestamp
+    if first_timestamp is None:
+        raise ValueError("All records must contain timestamps after parsing")
 
-    speed_times, speed_values = _extract_numeric_series(
-        records, "speed", time_origin
-    )
-    power_times, power_values = _extract_numeric_series(
-        records, "power", time_origin
-    )
-    cadence_times, cadence_values = _extract_numeric_series(
-        records, "cadence", time_origin
-    )
+    time_offsets = _timestamp_offsets(records)
+    speed_values = _aligned_attribute(records, "speed")
+    power_values = _aligned_attribute(records, "power")
+    cadence_values = _aligned_attribute(records, "cadence")
 
-    if speed_times.size == 0 or power_times.size == 0:
+    if np.any(np.isnan(speed_values)) or np.any(np.isnan(power_values)):
         raise ValueError("Speed and power streams are required for coefficient fitting")
 
+    time_origin = first_timestamp.timestamp()
     climb_series = compute_climbing_rate(records, time_origin=time_origin)
     acceleration_series = compute_acceleration(records, time_origin=time_origin)
 
-    power_resampled = _interpolate_series(power_times, power_values, speed_times)
-    cadence_resampled = _interpolate_series(cadence_times, cadence_values, speed_times)
-    climb_rate_resampled = _interpolate_series(
-        climb_series.times, climb_series.values, speed_times
-    )
-    acceleration_resampled = _interpolate_series(
-        acceleration_series.times, acceleration_series.values, speed_times
-    )
+    climb_rates = climb_series.values
+    acceleration_rates = acceleration_series.values
+
+    if climb_rates.size == 0:
+        climb_rates = np.zeros_like(speed_values)
+    if acceleration_rates.size == 0:
+        acceleration_rates = np.zeros_like(speed_values)
+
+    if (
+        climb_rates.shape != speed_values.shape
+        or acceleration_rates.shape != speed_values.shape
+    ):
+        raise ValueError("Aligned derived metrics must match the record timeline")
 
     rolling_term = system_mass_kg * GRAVITY_M_PER_S2 * speed_values
     aero_term = 0.5 * air_density * np.power(speed_values, 3)
-    gravity_power = system_mass_kg * GRAVITY_M_PER_S2 * np.nan_to_num(
-        climb_rate_resampled, nan=0.0
-    )
-    acceleration_power = system_mass_kg * np.nan_to_num(
-        acceleration_resampled, nan=0.0
-    ) * speed_values
+    gravity_power = system_mass_kg * GRAVITY_M_PER_S2 * climb_rates
+    acceleration_power = system_mass_kg * acceleration_rates * speed_values
 
-    mask = np.isfinite(power_resampled) & np.isfinite(rolling_term) & np.isfinite(
+    mask = np.isfinite(power_values) & np.isfinite(rolling_term) & np.isfinite(
         aero_term
     )
     if not np.any(mask):
         raise ValueError("Insufficient overlapping data to build power-balance samples")
 
     cadence_aligned = None
-    if np.any(np.isfinite(cadence_resampled)):
-        cadence_aligned = cadence_resampled
-        mask &= np.isfinite(cadence_resampled) | np.isnan(cadence_resampled)
+    if np.any(np.isfinite(cadence_values)):
+        cadence_aligned = cadence_values
+        mask &= np.isfinite(cadence_values) | np.isnan(cadence_values)
 
-    timestamps = speed_times[mask]
-    crank_power = power_resampled[mask]
+    timestamps = time_offsets[mask]
+    crank_power = power_values[mask]
     rolling = rolling_term[mask]
     aero = aero_term[mask]
     gravity = gravity_power[mask]
@@ -252,10 +233,10 @@ def fit_power_balance_parameters(
     data: PowerBalanceData,
     weights: np.ndarray | None = None,
     *,
-    loss: LossName = "tukey",
+    loss: LossName = "l2",
     loss_scale: float = 1.0,
     include_drivetrain_efficiency: bool = True,
-    fixed_efficiency: float = 1.0,
+    fixed_efficiency: float = 0.98,
     max_iterations: int = 25,
     tolerance: float = 1e-6,
 ) -> tuple[float, float, float]:
@@ -335,7 +316,7 @@ def estimate_coefficients_from_records(
     use_record_air_density: bool = False,
     cadence_weight_threshold: int | None = 30,
     weights: np.ndarray | None = None,
-    loss: LossName = "tukey",
+    loss: LossName = "l2",
     loss_scale: float = 1.0,
     include_drivetrain_efficiency: bool = True,
     fixed_efficiency: float = 1.0,
