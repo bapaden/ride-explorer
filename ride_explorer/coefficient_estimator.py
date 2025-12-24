@@ -33,7 +33,8 @@ from .derived_metrics import (
 )
 from .fit_parser import RecordPoint
 
-LossName = Literal["l2", "huber", "cauchy", "tukey"]
+# Retained for backward compatibility of type hints; only L2 is used currently.
+LossName = Literal["l2"]
 
 
 @dataclass(frozen=True)
@@ -168,30 +169,6 @@ def prepare_power_balance_data(
     )
 
 
-def _robust_weights(residuals: np.ndarray, loss: LossName) -> np.ndarray:
-    scaled = np.abs(residuals)
-
-    if loss == "l2":
-        return np.ones_like(residuals)
-
-    if loss == "huber":
-        weights = np.ones_like(residuals)
-        mask = scaled > 1
-        weights[mask] = 1 / scaled[mask]
-        return weights
-
-    if loss == "cauchy":
-        return 1 / (1 + np.square(scaled))
-
-    if loss == "tukey":
-        weights = np.zeros_like(residuals)
-        mask = scaled < 1
-        weights[mask] = np.square(1 - np.square(scaled[mask]))
-        return weights
-
-    raise ValueError(f"Unsupported loss '{loss}'")
-
-
 def _weighted_least_squares(
     design: np.ndarray, target: np.ndarray, weights: np.ndarray
 ) -> np.ndarray:
@@ -202,50 +179,12 @@ def _weighted_least_squares(
     return solution
 
 
-def _iteratively_reweighted_fit(
-    design: np.ndarray,
-    target: np.ndarray,
-    base_weights: np.ndarray,
-    loss: LossName,
-    loss_scale: float,
-    max_iterations: int,
-    tolerance: float,
-    initial_params: np.ndarray | None = None,
-) -> np.ndarray:
-    weights = base_weights
-    if initial_params is not None:
-        params = np.asarray(initial_params, dtype=float)
-        if params.shape != (design.shape[1],):
-            raise ValueError("initial_params must match the number of design columns")
-    else:
-        params = _weighted_least_squares(design, target, weights)
-
-    for _ in range(max_iterations):
-        residuals = design @ params - target
-        scaled_residuals = residuals / max(loss_scale, np.finfo(float).eps)
-        robust = _robust_weights(scaled_residuals, loss)
-        new_weights = base_weights * robust
-
-        if np.allclose(new_weights, weights, rtol=tolerance, atol=tolerance):
-            break
-
-        weights = new_weights
-        params = _weighted_least_squares(design, target, weights)
-
-    return params
-
-
 def fit_power_balance_parameters(
     data: PowerBalanceData,
     weights: np.ndarray | None = None,
     *,
-    loss: LossName = "l2",
-    loss_scale: float = 1.0,
     include_drivetrain_efficiency: bool = True,
     fixed_efficiency: float = 0.98,
-    max_iterations: int = 25,
-    tolerance: float = 1e-6,
-    initial_params: np.ndarray | None = None,
 ) -> tuple[float, float, float]:
     """Estimate drivetrain efficiency, rolling resistance, and CdA.
 
@@ -256,21 +195,12 @@ def fit_power_balance_parameters(
     weights:
         Optional per-sample weights. If provided, must match the number of
         samples in ``data``.
-    loss:
-        Robust loss function to apply (``"l2"``, ``"huber"``, ``"cauchy"``,
-        or ``"tukey"``).
-    loss_scale:
-        Scaling factor applied to residuals before computing the robust weight.
     include_drivetrain_efficiency:
         Whether to fit drivetrain efficiency (``eta``). If ``False``,
         ``fixed_efficiency`` is used instead.
     fixed_efficiency:
         Drivetrain efficiency to hold constant when ``include_drivetrain_efficiency``
         is ``False``.
-    max_iterations:
-        Maximum IRLS iterations for robust losses.
-    tolerance:
-        Convergence tolerance for weight updates.
 
     Returns
     -------
@@ -296,16 +226,7 @@ def fit_power_balance_parameters(
         design = np.column_stack([data.rolling_term, data.aero_term])
         target = -(fixed_efficiency * data.crank_power + data.gravity_power + data.acceleration_power)
 
-    params = _iteratively_reweighted_fit(
-        design=design,
-        target=target,
-        base_weights=base_weights,
-        loss=loss,
-        loss_scale=loss_scale,
-        max_iterations=max_iterations,
-        tolerance=tolerance,
-        initial_params=initial_params,
-    )
+    params = _weighted_least_squares(design=design, target=target, weights=base_weights)
 
     if include_drivetrain_efficiency:
         eta, crr, cda = params.tolist()
@@ -324,12 +245,8 @@ def estimate_coefficients_from_records(
     use_record_air_density: bool = False,
     cadence_weight_threshold: int | None = 30,
     weights: np.ndarray | None = None,
-    loss: LossName = "l2",
-    loss_scale: float = 1.0,
     include_drivetrain_efficiency: bool = True,
     fixed_efficiency: float = 1.0,
-    max_iterations: int = 25,
-    tolerance: float = 1e-6,
 ) -> tuple[float, float, float]:
     """Driver helper to fit coefficients directly from FIT records.
 
@@ -365,10 +282,6 @@ def estimate_coefficients_from_records(
     return fit_power_balance_parameters(
         data=data,
         weights=base_weights,
-        loss=loss,
-        loss_scale=loss_scale,
         include_drivetrain_efficiency=include_drivetrain_efficiency,
         fixed_efficiency=fixed_efficiency,
-        max_iterations=max_iterations,
-        tolerance=tolerance,
     )

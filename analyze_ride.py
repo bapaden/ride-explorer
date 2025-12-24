@@ -215,7 +215,6 @@ def _plot_residuals(
     eta: float,
     crr: float,
     cda: float,
-    loss: str,
     error_message: str | None = None,
 ) -> None:
     if error_message:
@@ -247,8 +246,7 @@ def _plot_residuals(
     ax.set_ylabel("Residual (W)")
     ax.set_title(
         (
-            "Residuals "
-            f"(η={eta:.3f}, Crr={crr:.4f}, CdA={cda:.3f}, loss={loss})"
+            "Residuals " f"(η={eta:.3f}, Crr={crr:.4f}, CdA={cda:.3f})"
         )
     )
     ax.legend(loc="upper right")
@@ -263,7 +261,6 @@ def _plot_residual_histogram(
     eta: float,
     crr: float,
     cda: float,
-    loss: str,
     error_message: str | None = None,
 ) -> None:
     if error_message:
@@ -286,7 +283,7 @@ def _plot_residual_histogram(
     ax.set_title(
         (
             "Residual distribution "
-            f"(η={eta:.3f}, Crr={crr:.4f}, CdA={cda:.3f}, loss={loss})"
+            f"(η={eta:.3f}, Crr={crr:.4f}, CdA={cda:.3f})"
         )
     )
     ax.grid(True)
@@ -333,7 +330,6 @@ def _plot_activity(
     eta: float,
     crr: float,
     cda: float,
-    loss: str,
     estimate_parameters: bool,
 ) -> None:
     plt.style.use("ggplot")
@@ -372,7 +368,6 @@ def _plot_activity(
     plot_eta = eta
     plot_crr = crr
     plot_cda = cda
-    loss_name = "l2"
     estimation_stats: dict[str, float] | None = None
     try:
         power_balance_data = prepare_power_balance_data(
@@ -389,25 +384,20 @@ def _plot_activity(
 
         try:
             if estimate_parameters:
-                initial_params = np.array([eta, crr, cda], dtype=float)
                 estimated_params = fit_power_balance_parameters(
                     data=power_balance_data,
                     weights=estimation_weights,
-                    loss=loss,
-                    initial_params=initial_params,
                 )
                 plot_eta, plot_crr, plot_cda = estimated_params
                 print(
                     "Estimated parameters "
-                    f"(loss={loss}): η={plot_eta:.3f}, Crr={plot_crr:.4f}, "
-                    f"CdA={plot_cda:.3f}"
+                    f"η={plot_eta:.3f}, Crr={plot_crr:.4f}, CdA={plot_cda:.3f}"
                 )
             else:
                 print(
                     "Skipping estimation; using provided parameters "
                     f"η={plot_eta:.3f}, Crr={plot_crr:.4f}, CdA={plot_cda:.3f}"
                 )
-            loss_name = loss
             residuals = _power_balance_residual(
                 power_balance_data, plot_eta, plot_crr, plot_cda
             )
@@ -473,7 +463,6 @@ def _plot_activity(
         eta=plot_eta,
         crr=plot_crr,
         cda=plot_cda,
-        loss=loss_name,
         error_message=power_balance_error,
     )
     residual_fig.tight_layout()
@@ -487,7 +476,6 @@ def _plot_activity(
         eta=plot_eta,
         crr=plot_crr,
         cda=plot_cda,
-        loss=loss_name,
         error_message=power_balance_error,
     )
     residual_hist_fig.tight_layout()
@@ -555,19 +543,13 @@ def main() -> None:
         help="Drivetrain efficiency (0–1) used for power balance calculations.",
     )
     parser.add_argument(
-        "--loss",
-        choices=["l2", "huber", "cauchy", "tukey"],
-        default="l2",
-        help="Loss function to use for coefficient estimation (default: l2).",
-    )
-    parser.add_argument(
         "--estimate_parameters",
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
             "Whether to run parameter estimation. When true, supplied "
-            "eta/Crr/CdA values seed the optimizer; when false, supplied "
-            "values are used without optimization."
+            "eta/Crr/CdA values are used for weighting gates and plots; "
+            "when false, supplied values are used without optimization."
         ),
     )
 
@@ -597,7 +579,6 @@ def main() -> None:
         eta=args.eta,
         crr=args.crr,
         cda=args.cda,
-        loss=args.loss,
         estimate_parameters=args.estimate_parameters,
     )
 
