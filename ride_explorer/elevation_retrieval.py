@@ -10,8 +10,9 @@ be interpolated back onto the FIT timestamp grid by callers in
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
 import requests
@@ -111,27 +112,45 @@ def fetch_open_meteo_elevations(
     *,
     session: requests.Session | None = None,
     timeout: float = 10.0,
+    max_batch_size: int = 100,
 ) -> list[float]:
-    """Fetch elevations (meters above sea level) from Open-Meteo."""
+    """Fetch elevations (meters above sea level) from Open-Meteo.
+
+    Open-Meteo supports batching multiple coordinate pairs in a single request,
+    but excessively long query strings can trigger 414 responses. This helper
+    splits the coordinate list into chunks capped by ``max_batch_size`` to keep
+    URLs manageable.
+    """
+
+    if max_batch_size <= 0:
+        raise ValueError("max_batch_size must be positive")
 
     coords = list(coordinates)
     if not coords:
         return []
 
-    latitudes = ",".join(f"{coord.latitude:.6f}" for coord in coords)
-    longitudes = ",".join(f"{coord.longitude:.6f}" for coord in coords)
-    params = {"latitude": latitudes, "longitude": longitudes}
-
     http_get = session.get if session is not None else requests.get
-    response = http_get("https://api.open-meteo.com/v1/elevation", params=params, timeout=timeout)
-    response.raise_for_status()
+    accumulated: list[float] = []
 
-    payload = response.json()
-    elevations = payload.get("elevation")
-    if elevations is None or len(elevations) != len(coords):
-        raise ValueError("Open-Meteo elevation response did not match requested coordinates")
+    for start in range(0, len(coords), max_batch_size):
+        batch = coords[start : start + max_batch_size]
+        latitudes = ",".join(f"{coord.latitude:.6f}" for coord in batch)
+        longitudes = ",".join(f"{coord.longitude:.6f}" for coord in batch)
+        params = {"latitude": latitudes, "longitude": longitudes}
 
-    return [float(value) for value in elevations]
+        response = http_get(
+            "https://api.open-meteo.com/v1/elevation", params=params, timeout=timeout
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        elevations = payload.get("elevation")
+        if elevations is None or len(elevations) != len(batch):
+            raise ValueError("Open-Meteo elevation response did not match requested coordinates")
+
+        accumulated.extend(float(value) for value in elevations)
+
+    return accumulated
 
 
 def sample_elevations_along_track(
@@ -140,15 +159,32 @@ def sample_elevations_along_track(
     spacing_meters: float = 25.0,
     session: requests.Session | None = None,
     timeout: float = 10.0,
+    max_batch_size: int = 100,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return timestamped elevation samples along a ride."""
+    """Return timestamped elevation samples along a ride.
+
+    Parameters
+    ----------
+    records:
+        Ride record stream containing timestamps and coordinates.
+    spacing_meters:
+        Distance between greedy coordinate samples along the track.
+    session:
+        Optional ``requests.Session`` to reuse connections.
+    timeout:
+        Timeout (in seconds) for each Open-Meteo request.
+    max_batch_size:
+        Maximum number of coordinates to include in a single Open-Meteo request.
+    """
 
     samples = greedy_sample_records(records, spacing_meters=spacing_meters)
     if not samples:
         empty = np.array([], dtype=float)
         return empty, empty
 
-    elevations = fetch_open_meteo_elevations(samples, session=session, timeout=timeout)
+    elevations = fetch_open_meteo_elevations(
+        samples, session=session, timeout=timeout, max_batch_size=max_batch_size
+    )
     sample_times = np.fromiter((sample.timestamp for sample in samples), dtype=float)
     sample_elevations = np.asarray(elevations, dtype=float)
     return sample_times, sample_elevations

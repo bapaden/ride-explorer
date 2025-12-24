@@ -73,6 +73,7 @@ def compute_climbing_rate(
     time_origin: float | None = None,
     sample_spacing_m: float = 25.0,
     session: requests.Session | None = None,
+    max_batch_size: int = 100,
     elevation_series: DerivedSeries | None = None,
 ) -> DerivedSeries:
     """Compute climbing rate (vertical speed) in m/s using finite differences.
@@ -104,6 +105,8 @@ def compute_climbing_rate(
     session:
         Optional ``requests.Session`` to reuse connections when hitting the
         Open-Meteo elevation API.
+    max_batch_size:
+        Maximum number of coordinates to include in a single Open-Meteo request.
     elevation_series:
         Precomputed altitude profile aligned to the record timestamps. When
         omitted, the elevation profile is built using the ride coordinates and
@@ -123,6 +126,7 @@ def compute_climbing_rate(
             time_origin=time_origin,
             sample_spacing_m=sample_spacing_m,
             session=session,
+            max_batch_size=max_batch_size,
         )
 
     series = elevation_series
@@ -169,6 +173,7 @@ def compute_all_derived_metrics(
     time_origin: float | None = None,
     sample_spacing_m: float = 25.0,
     session: requests.Session | None = None,
+    max_batch_size: int = 100,
 ) -> dict[str, DerivedSeries]:
     """Compute all available derived metrics for a given record stream.
 
@@ -188,6 +193,8 @@ def compute_all_derived_metrics(
     session:
         Optional ``requests.Session`` to reuse connections when hitting the
         Open-Meteo elevation API.
+    max_batch_size:
+        Maximum number of coordinates to include in a single Open-Meteo request.
     """
 
     elevation_series = compute_elevation_series(
@@ -195,6 +202,7 @@ def compute_all_derived_metrics(
         time_origin=time_origin,
         sample_spacing_m=sample_spacing_m,
         session=session,
+        max_batch_size=max_batch_size,
     )
 
     return {
@@ -203,6 +211,7 @@ def compute_all_derived_metrics(
             time_origin=time_origin,
             sample_spacing_m=sample_spacing_m,
             session=session,
+            max_batch_size=max_batch_size,
             elevation_series=elevation_series,
         ),
         "acceleration": compute_acceleration(records, time_origin=time_origin),
@@ -216,6 +225,7 @@ def compute_mechanical_power(
     time_origin: float | None = None,
     sample_spacing_m: float = 25.0,
     session: requests.Session | None = None,
+    max_batch_size: int = 100,
 ) -> dict[str, DerivedSeries]:
     """Estimate mechanical power components for acceleration and climbing.
 
@@ -244,6 +254,8 @@ def compute_mechanical_power(
     session:
         Optional ``requests.Session`` to reuse connections when hitting the
         Open-Meteo elevation API.
+    max_batch_size:
+        Maximum number of coordinates to include in a single Open-Meteo request.
 
     Returns
     -------
@@ -271,12 +283,14 @@ def compute_mechanical_power(
         time_origin=time_origin,
         sample_spacing_m=sample_spacing_m,
         session=session,
+        max_batch_size=max_batch_size,
     )
     climb_series = compute_climbing_rate(
         records,
         time_origin=time_origin,
         sample_spacing_m=sample_spacing_m,
         session=session,
+        max_batch_size=max_batch_size,
         elevation_series=elevation_series,
     )
 
@@ -310,12 +324,29 @@ def compute_elevation_series(
     time_origin: float | None = None,
     sample_spacing_m: float = 25.0,
     session: requests.Session | None = None,
+    max_batch_size: int = 100,
 ) -> DerivedSeries:
     """Construct an elevation profile using Open-Meteo instead of FIT data.
 
     Coordinates are greedily sampled along the ride every ``sample_spacing_m``
     meters, queried against the Open-Meteo elevation endpoint, and then
     interpolated back onto the FIT timestamp grid.
+
+    Parameters
+    ----------
+    records:
+        Ordered sequence of :class:`ride_explorer.fit_parser.RecordPoint`.
+    time_origin:
+        Optional absolute timestamp (seconds since epoch) used as the zero
+        reference for the returned ``times`` array. When omitted, the first
+        timestamp in the FIT stream is used.
+    sample_spacing_m:
+        Distance between online elevation queries, measured along the route.
+    session:
+        Optional ``requests.Session`` to reuse connections when hitting the
+        Open-Meteo elevation API.
+    max_batch_size:
+        Maximum number of coordinates to include in a single Open-Meteo request.
     """
 
     if not records:
@@ -332,6 +363,7 @@ def compute_elevation_series(
         records,
         spacing_meters=sample_spacing_m,
         session=session,
+        max_batch_size=max_batch_size,
     )
     if sample_times.size == 0 or sample_elevations.size == 0:
         return DerivedSeries(times=np.array([]), values=np.array([]))
