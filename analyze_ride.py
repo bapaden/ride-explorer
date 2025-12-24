@@ -551,6 +551,15 @@ def main() -> None:
         help="Drivetrain efficiency (0–1) used for power balance calculations.",
     )
     parser.add_argument(
+        "--smoothing_window",
+        type=int,
+        default=1,
+        help=(
+            "Window size for moving-average smoothing applied to interpolated "
+            "record streams. A value of 1 disables smoothing."
+        ),
+    )
+    parser.add_argument(
         "--estimate_parameters",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -584,8 +593,10 @@ def main() -> None:
         raise ValueError("--crr must be non-negative")
     if not 0 < args.eta <= 1:
         raise ValueError("--eta must be in the range (0, 1]")
+    if args.smoothing_window <= 0:
+        raise ValueError("--smoothing_window must be a positive integer")
 
-    data = parse_cycling_fit(fit_path)
+    data = parse_cycling_fit(fit_path, smoothing_window=args.smoothing_window)
 
     show_plot = not args.no_show and args.output is None
     _plot_activity(
