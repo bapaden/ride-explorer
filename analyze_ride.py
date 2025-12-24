@@ -331,6 +331,7 @@ def _plot_activity(
     crr: float,
     cda: float,
     estimate_parameters: bool,
+    estimate_efficiency: bool,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -392,6 +393,8 @@ def _plot_activity(
                 estimated_params = fit_power_balance_parameters(
                     data=power_balance_data,
                     weights=estimation_weights,
+                    include_drivetrain_efficiency=estimate_efficiency,
+                    fixed_efficiency=eta,
                 )
                 plot_eta, plot_crr, plot_cda = estimated_params
                 print(
@@ -557,6 +560,15 @@ def main() -> None:
             "when false, supplied values are used without optimization."
         ),
     )
+    parser.add_argument(
+        "--estimate_efficiency",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether to estimate drivetrain efficiency (eta). When false, "
+            "eta is fixed to the provided value and only Crr/CdA are estimated."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -585,6 +597,7 @@ def main() -> None:
         crr=args.crr,
         cda=args.cda,
         estimate_parameters=args.estimate_parameters,
+        estimate_efficiency=args.estimate_efficiency,
     )
 
 
