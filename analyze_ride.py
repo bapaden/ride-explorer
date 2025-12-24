@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.colors import Normalize
+from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
 
 from ride_explorer.coefficient_estimator import (
     PowerBalanceData,
@@ -44,10 +48,10 @@ def _time_series(
     return timestamps, values
 
 
-def _plot_route(ax, positions: Iterable[Tuple[float, float]]) -> None:
+def _plot_route(ax, positions: Iterable[Tuple[float, float, Optional[float]]]) -> None:
     lons: List[float] = []
     lats: List[float] = []
-    for lon, lat in positions:
+    for lon, lat, *_ in positions:
         lons.append(lon)
         lats.append(lat)
 
@@ -59,9 +63,136 @@ def _plot_route(ax, positions: Iterable[Tuple[float, float]]) -> None:
     ax.plot(lons, lats, color="tab:blue", linewidth=2)
     ax.set_xlabel("Longitude (°)")
     ax.set_ylabel("Latitude (°)")
-    ax.set_title("Route")
+    ax.set_title("Route (top-down)")
     ax.set_aspect("equal", adjustable="datalim")
     ax.grid(True)
+
+
+def _plot_elevation_ribbon(
+    ax, positions: Iterable[Tuple[float, float, Optional[float]]]
+) -> None:
+    lons: list[float] = []
+    lats: list[float] = []
+    alts: list[float] = []
+    for lon, lat, alt in positions:
+        if alt is None:
+            continue
+        lons.append(lon)
+        lats.append(lat)
+        alts.append(alt)
+
+    if not lons or not alts:
+        ax.text(
+            0.5,
+            0.5,
+            "No elevation data available",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+        return
+
+    points_llh = np.column_stack((lons, lats, alts))
+    if len(points_llh) < 2:
+        ax.text(
+            0.5,
+            0.5,
+            "Insufficient elevation samples",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+        )
+        ax.set_axis_off()
+        return
+
+    lat0 = points_llh[0, 1]
+    lon0 = points_llh[0, 0]
+    cos_lat0 = math.cos(math.radians(lat0))
+    east_m = (points_llh[:, 0] - lon0) * 111_320 * cos_lat0
+    north_m = (points_llh[:, 1] - lat0) * 110_540
+    east_km = east_m / 1000.0
+    north_km = north_m / 1000.0
+
+    points = np.column_stack((east_km, north_km, alts))
+
+    path_extent = max(
+        max(east_km) - min(east_km),
+        max(north_km) - min(north_km),
+    )
+    ribbon_width = 0.04 * path_extent if path_extent > 0 else 0.01
+
+    xy = points[:, :2]
+    vectors = np.diff(xy, axis=0)
+    norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    normals = np.column_stack((-vectors[:, 1], vectors[:, 0])) / norms
+
+    point_normals = np.zeros_like(xy)
+    point_normals[0] = normals[0]
+    point_normals[-1] = normals[-1]
+    if len(points) > 2:
+        point_normals[1:-1] = normals[:-1] + normals[1:]
+        lengths = np.linalg.norm(point_normals[1:-1], axis=1, keepdims=True)
+        lengths[lengths == 0] = 1.0
+        point_normals[1:-1] /= lengths
+
+    left_edge = xy + ribbon_width * point_normals
+    right_edge = xy - ribbon_width * point_normals
+
+    ribbon_faces = []
+    face_colors = []
+    for idx in range(len(points) - 1):
+        face = [
+            (left_edge[idx, 0], left_edge[idx, 1], points[idx, 2]),
+            (right_edge[idx, 0], right_edge[idx, 1], points[idx, 2]),
+            (right_edge[idx + 1, 0], right_edge[idx + 1, 1], points[idx + 1, 2]),
+            (left_edge[idx + 1, 0], left_edge[idx + 1, 1], points[idx + 1, 2]),
+        ]
+        ribbon_faces.append(face)
+        face_colors.append((points[idx, 2] + points[idx + 1, 2]) / 2)
+
+    alt_min = min(alts)
+    alt_max = max(alts)
+    if math.isclose(alt_min, alt_max):
+        alt_max = alt_min + 1.0
+
+    norm = Normalize(vmin=alt_min, vmax=alt_max)
+    cmap = plt.get_cmap("plasma")
+
+    poly = Poly3DCollection(
+        ribbon_faces,
+        facecolors=cmap(norm(face_colors)),
+        edgecolors="k",
+        linewidths=0.25,
+        alpha=0.9,
+    )
+    ax.add_collection3d(poly)
+
+    segments = np.stack([points[:-1], points[1:]], axis=1)
+    lc = Line3DCollection(
+        segments,
+        colors="k",
+        linewidths=0.5,
+        alpha=0.4,
+    )
+    ax.add_collection3d(lc)
+
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array(alts)
+    ax.figure.colorbar(sm, ax=ax, pad=0.1, label="Elevation (m)")
+
+    ax.set_xlabel("East offset (km)")
+    ax.set_ylabel("North offset (km)")
+    ax.set_zlabel("Elevation (m)")
+    ax.set_title("Elevation ribbon")
+    ax.view_init(elev=25, azim=-70)
+    ax.grid(True, alpha=0.25)
+    ax.set_facecolor("white")
+    east_range = max(east_km) - min(east_km)
+    north_range = max(north_km) - min(north_km)
+    alt_range = alt_max - alt_min
+    ax.set_box_aspect((east_range or 1.0, north_range or 1.0, alt_range or 1.0))
 
 
 def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
@@ -174,15 +305,17 @@ def _plot_power_balance_terms(
     ax.grid(True)
 
 
-def _build_route_positions(records: Sequence[RecordPoint]) -> List[Tuple[float, float]]:
-    positions: List[Tuple[float, float]] = []
+def _build_route_positions(
+    records: Sequence[RecordPoint],
+) -> List[Tuple[float, float, Optional[float]]]:
+    positions: List[Tuple[float, float, Optional[float]]] = []
     for record in records:
         if record.position is None:
             continue
         lat, lon = record.position
         if lat is None or lon is None:
             continue
-        positions.append((lon, lat))
+        positions.append((lon, lat, record.altitude))
     return positions
 
 
@@ -206,9 +339,15 @@ def _plot_activity(
 
     figures: list[tuple[str, plt.Figure]] = []
 
-    route_fig, route_ax = plt.subplots(figsize=(8, 8))
+    route_positions = _build_route_positions(data.records)
+
+    route_fig = plt.figure(figsize=(14, 6))
     route_fig.suptitle(f"GPS Route: {data.source.name}", fontsize=14)
-    _plot_route(route_ax, _build_route_positions(data.records))
+    route_grid = route_fig.add_gridspec(1, 2, width_ratios=[1, 1.2])
+    route_ax = route_fig.add_subplot(route_grid[0, 0])
+    route_ax_3d = route_fig.add_subplot(route_grid[0, 1], projection="3d")
+    _plot_route(route_ax, route_positions)
+    _plot_elevation_ribbon(route_ax_3d, route_positions)
     route_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("route", route_fig))
 
