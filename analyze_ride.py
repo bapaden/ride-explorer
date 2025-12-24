@@ -8,6 +8,10 @@ from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 
+from ride_explorer.coefficient_estimator import (
+    PowerBalanceData,
+    prepare_power_balance_data,
+)
 from ride_explorer.derived_metrics import compute_mechanical_power
 from ride_explorer.fit_parser import CyclingFitData, RecordPoint, parse_cycling_fit
 
@@ -114,6 +118,62 @@ def _plot_power_components(ax, power_series) -> None:
     ax.grid(True)
 
 
+def _plot_power_balance_terms(
+    ax,
+    power_data: PowerBalanceData | None,
+    eta: float,
+    crr: float,
+    cda: float,
+    error_message: str | None = None,
+) -> None:
+    if error_message:
+        ax.text(0.5, 0.5, error_message, ha="center", va="center")
+        ax.set_axis_off()
+        return
+
+    if power_data is None or power_data.sample_count == 0:
+        ax.text(0.5, 0.5, "No power-balance data available", ha="center", va="center")
+        ax.set_axis_off()
+        return
+
+    times = power_data.timestamps
+    components = [
+        ("η × crank power (W)", eta * power_data.crank_power),
+        ("Rolling losses (W)", crr * power_data.rolling_term),
+        ("Aerodynamic losses (W)", cda * power_data.aero_term),
+        ("Gravitational power (W)", power_data.gravity_power),
+        ("Acceleration power (W)", power_data.acceleration_power),
+    ]
+
+    has_data = False
+    for label, values in components:
+        if values.size == 0:
+            continue
+        has_data = True
+        ax.plot(times, values, label=label)
+
+    residual = (
+        eta * power_data.crank_power
+        + crr * power_data.rolling_term
+        + cda * power_data.aero_term
+        + power_data.gravity_power
+        + power_data.acceleration_power
+    )
+    if residual.size:
+        ax.plot(times, residual, label="Power balance residual (W)", linestyle="--")
+
+    if not has_data:
+        ax.text(0.5, 0.5, "No derived power data", ha="center", va="center")
+        ax.set_axis_off()
+        return
+
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Power (W)")
+    ax.set_title("Power balance components")
+    ax.legend(loc="upper right")
+    ax.grid(True)
+
+
 def _build_route_positions(records: Sequence[RecordPoint]) -> List[Tuple[float, float]]:
     positions: List[Tuple[float, float]] = []
     for record in records:
@@ -133,7 +193,14 @@ def _figure_output_path(base: Path, suffix: str) -> Path:
 
 
 def _plot_activity(
-    data: CyclingFitData, system_mass_kg: float, show: bool, output: Path | None
+    data: CyclingFitData,
+    system_mass_kg: float,
+    show: bool,
+    output: Path | None,
+    *,
+    eta: float,
+    crr: float,
+    cda: float,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -160,6 +227,34 @@ def _plot_activity(
     _plot_power_components(power_ax, power_series)
     power_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("power", power_fig))
+
+    power_balance_data: PowerBalanceData | None = None
+    power_balance_error: str | None = None
+    try:
+        power_balance_data = prepare_power_balance_data(
+            data.records, system_mass_kg=system_mass_kg
+        )
+    except ValueError as exc:
+        power_balance_error = str(exc)
+
+    power_balance_fig, power_balance_ax = plt.subplots(figsize=(12, 6))
+    power_balance_fig.suptitle(
+        (
+            f"Power balance (CdA={cda:.3f}, Crr={crr:.4f}, η={eta:.2f}): "
+            f"{data.source.name}"
+        ),
+        fontsize=14,
+    )
+    _plot_power_balance_terms(
+        power_balance_ax,
+        power_balance_data,
+        eta=eta,
+        crr=crr,
+        cda=cda,
+        error_message=power_balance_error,
+    )
+    power_balance_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    figures.append(("power_balance", power_balance_fig))
 
     if output:
         for suffix, fig in figures:
@@ -204,6 +299,24 @@ def main() -> None:
             "calculations."
         ),
     )
+    parser.add_argument(
+        "--cda",
+        type=float,
+        default=0.32,
+        help="Aerodynamic drag area (m^2) used for power balance calculations.",
+    )
+    parser.add_argument(
+        "--crr",
+        type=float,
+        default=0.004,
+        help="Rolling resistance coefficient (unitless) for power balance calculations.",
+    )
+    parser.add_argument(
+        "--eta",
+        type=float,
+        default=0.97,
+        help="Drivetrain efficiency (0–1) used for power balance calculations.",
+    )
 
     args = parser.parse_args()
 
@@ -213,12 +326,24 @@ def main() -> None:
 
     if args.system_mass <= 0:
         raise ValueError("--system_mass must be positive (in kilograms)")
+    if args.cda <= 0:
+        raise ValueError("--cda must be positive")
+    if args.crr < 0:
+        raise ValueError("--crr must be non-negative")
+    if not 0 < args.eta <= 1:
+        raise ValueError("--eta must be in the range (0, 1]")
 
     data = parse_cycling_fit(fit_path)
 
     show_plot = not args.no_show and args.output is None
     _plot_activity(
-        data, system_mass_kg=args.system_mass, show=show_plot, output=args.output
+        data,
+        system_mass_kg=args.system_mass,
+        show=show_plot,
+        output=args.output,
+        eta=args.eta,
+        crr=args.crr,
+        cda=args.cda,
     )
 
 
