@@ -16,8 +16,10 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
+import requests
 
 from .fit_parser import RecordPoint
+from .elevation_retrieval import sample_elevations_along_track
 
 GRAVITY_M_PER_S2 = 9.80665
 
@@ -66,7 +68,12 @@ def _extract_numeric_series(
 
 
 def compute_climbing_rate(
-    records: Sequence[RecordPoint], *, time_origin: float | None = None
+    records: Sequence[RecordPoint],
+    *,
+    time_origin: float | None = None,
+    sample_spacing_m: float = 25.0,
+    session: requests.Session | None = None,
+    elevation_series: DerivedSeries | None = None,
 ) -> DerivedSeries:
     """Compute climbing rate (vertical speed) in m/s using finite differences.
 
@@ -92,6 +99,15 @@ def compute_climbing_rate(
         Optional absolute timestamp (seconds since epoch) used as the zero
         reference for the returned ``times`` array. When omitted, the first valid
         timestamp in the altitude series is used.
+    sample_spacing_m:
+        Distance between online elevation queries, measured along the route.
+    session:
+        Optional ``requests.Session`` to reuse connections when hitting the
+        Open-Meteo elevation API.
+    elevation_series:
+        Precomputed altitude profile aligned to the record timestamps. When
+        omitted, the elevation profile is built using the ride coordinates and
+        Open-Meteo.
 
     Returns
     -------
@@ -101,7 +117,15 @@ def compute_climbing_rate(
         If fewer than two valid samples exist, both arrays are empty.
     """
 
-    series = _extract_numeric_series(records, "altitude", time_origin=time_origin)
+    if elevation_series is None:
+        elevation_series = compute_elevation_series(
+            records,
+            time_origin=time_origin,
+            sample_spacing_m=sample_spacing_m,
+            session=session,
+        )
+
+    series = elevation_series
     if series.times.size < 2:
         # Derivatives require at least two samples; return empty arrays otherwise.
         return DerivedSeries(times=np.array([]), values=np.array([]))
@@ -140,7 +164,11 @@ def compute_acceleration(
 
 
 def compute_all_derived_metrics(
-    records: Sequence[RecordPoint], *, time_origin: float | None = None
+    records: Sequence[RecordPoint],
+    *,
+    time_origin: float | None = None,
+    sample_spacing_m: float = 25.0,
+    session: requests.Session | None = None,
 ) -> dict[str, DerivedSeries]:
     """Compute all available derived metrics for a given record stream.
 
@@ -155,10 +183,28 @@ def compute_all_derived_metrics(
         Optional absolute timestamp (seconds since epoch) used as the zero
         reference for the returned ``times`` arrays. When omitted, each series
         uses its own first valid timestamp.
+    sample_spacing_m:
+        Distance between online elevation queries, measured along the route.
+    session:
+        Optional ``requests.Session`` to reuse connections when hitting the
+        Open-Meteo elevation API.
     """
 
+    elevation_series = compute_elevation_series(
+        records,
+        time_origin=time_origin,
+        sample_spacing_m=sample_spacing_m,
+        session=session,
+    )
+
     return {
-        "climbing_rate": compute_climbing_rate(records, time_origin=time_origin),
+        "climbing_rate": compute_climbing_rate(
+            records,
+            time_origin=time_origin,
+            sample_spacing_m=sample_spacing_m,
+            session=session,
+            elevation_series=elevation_series,
+        ),
         "acceleration": compute_acceleration(records, time_origin=time_origin),
     }
 
@@ -168,6 +214,8 @@ def compute_mechanical_power(
     system_mass_kg: float,
     *,
     time_origin: float | None = None,
+    sample_spacing_m: float = 25.0,
+    session: requests.Session | None = None,
 ) -> dict[str, DerivedSeries]:
     """Estimate mechanical power components for acceleration and climbing.
 
@@ -191,6 +239,11 @@ def compute_mechanical_power(
         Optional absolute timestamp (seconds since epoch) used as the zero
         reference for the returned ``times`` arrays. When omitted, the first
         valid timestamp in each series is used.
+    sample_spacing_m:
+        Distance between online elevation queries, measured along the route.
+    session:
+        Optional ``requests.Session`` to reuse connections when hitting the
+        Open-Meteo elevation API.
 
     Returns
     -------
@@ -213,7 +266,19 @@ def compute_mechanical_power(
     # Acceleration uses the speed stream; the speed samples define the time grid
     # for the final power calculation.
     accel_series = compute_acceleration(records, time_origin=time_origin)
-    climb_series = compute_climbing_rate(records, time_origin=time_origin)
+    elevation_series = compute_elevation_series(
+        records,
+        time_origin=time_origin,
+        sample_spacing_m=sample_spacing_m,
+        session=session,
+    )
+    climb_series = compute_climbing_rate(
+        records,
+        time_origin=time_origin,
+        sample_spacing_m=sample_spacing_m,
+        session=session,
+        elevation_series=elevation_series,
+    )
 
     if accel_series.times.size == 0 or climb_series.times.size == 0:
         empty = DerivedSeries(times=np.array([]), values=np.array([]))
@@ -237,3 +302,51 @@ def compute_mechanical_power(
             times=aligned_times, values=acceleration_power
         ),
     }
+
+
+def compute_elevation_series(
+    records: Sequence[RecordPoint],
+    *,
+    time_origin: float | None = None,
+    sample_spacing_m: float = 25.0,
+    session: requests.Session | None = None,
+) -> DerivedSeries:
+    """Construct an elevation profile using Open-Meteo instead of FIT data.
+
+    Coordinates are greedily sampled along the ride every ``sample_spacing_m``
+    meters, queried against the Open-Meteo elevation endpoint, and then
+    interpolated back onto the FIT timestamp grid.
+    """
+
+    if not records:
+        return DerivedSeries(times=np.array([]), values=np.array([]))
+
+    timestamps = np.array(
+        [record.timestamp.timestamp() for record in records if record.timestamp],
+        dtype=float,
+    )
+    if timestamps.size != len(records):
+        return DerivedSeries(times=np.array([]), values=np.array([]))
+
+    sample_times, sample_elevations = sample_elevations_along_track(
+        records,
+        spacing_meters=sample_spacing_m,
+        session=session,
+    )
+    if sample_times.size == 0 or sample_elevations.size == 0:
+        return DerivedSeries(times=np.array([]), values=np.array([]))
+
+    order = np.argsort(sample_times)
+    sample_times = sample_times[order]
+    sample_elevations = sample_elevations[order]
+
+    start = time_origin if time_origin is not None else timestamps[0]
+    interpolated = np.interp(
+        timestamps,
+        sample_times,
+        sample_elevations,
+        left=sample_elevations[0],
+        right=sample_elevations[-1],
+    )
+
+    return DerivedSeries(times=timestamps - start, values=interpolated)

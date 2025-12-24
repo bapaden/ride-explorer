@@ -17,6 +17,7 @@ from .derived_metrics import (
     compute_acceleration,
     compute_all_derived_metrics,
     compute_climbing_rate,
+    compute_elevation_series,
     compute_mechanical_power,
 )
 from .air_density import AIR_DENSITY_KG_PER_M3, estimate_air_density_from_records
@@ -39,6 +40,7 @@ __all__ = [
     "compute_acceleration",
     "compute_all_derived_metrics",
     "compute_climbing_rate",
+    "compute_elevation_series",
     "compute_mechanical_power",
     "estimate_coefficients_from_records",
     "estimate_air_density_from_records",
