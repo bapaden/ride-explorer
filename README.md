@@ -27,3 +27,9 @@ Save the plot instead of showing it (useful for headless environments):
 ```bash
 python3 analyze_ride.py --fit_file path/to/activity.fit --output ride.png --no-show --system_mass 85
 ```
+
+Apply simple moving-average smoothing to interpolated record streams:
+
+```bash
+python3 analyze_ride.py --fit_file path/to/activity.fit --system_mass 85 --smoothing_window 5
+```

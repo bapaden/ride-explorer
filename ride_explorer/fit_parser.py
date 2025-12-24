@@ -272,8 +272,23 @@ def _cast_value(value: float, *, to_int: bool = False):
     return float(value)
 
 
-def _align_records(records: Sequence[RecordPoint]) -> list[RecordPoint]:
-    """Resample all record fields onto a common timestamp grid.
+def _moving_average(values: np.ndarray, window: int) -> np.ndarray:
+    """Return a centered moving average with edge-value padding."""
+
+    if window <= 1:
+        return values
+
+    pad_left = window // 2
+    pad_right = window - 1 - pad_left
+    padded = np.pad(values, (pad_left, pad_right), mode="edge")
+    kernel = np.full(window, 1 / window, dtype=float)
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _align_and_smooth_records(
+    records: Sequence[RecordPoint], smoothing_window: int
+) -> list[RecordPoint]:
+    """Resample all record fields onto a common timestamp grid and smooth them.
 
     The returned records contain a value for every field at each timestamp,
     using interpolation (with edge values held constant) for attributes that do
@@ -289,20 +304,39 @@ def _align_records(records: Sequence[RecordPoint]) -> list[RecordPoint]:
         [ts.timestamp() for ts in time_grid], dtype=float
     )
 
-    altitude = _interpolate_numeric_stream(records, "altitude", target_seconds)
-    distance = _interpolate_numeric_stream(records, "distance", target_seconds)
-    speed = _interpolate_numeric_stream(records, "speed", target_seconds)
-    heart_rate = _interpolate_numeric_stream(
-        records, "heart_rate", target_seconds, round_to_int=True
+    altitude = _moving_average(
+        _interpolate_numeric_stream(records, "altitude", target_seconds),
+        smoothing_window,
     )
-    cadence = _interpolate_numeric_stream(
-        records, "cadence", target_seconds, round_to_int=True
+    distance = _moving_average(
+        _interpolate_numeric_stream(records, "distance", target_seconds),
+        smoothing_window,
     )
-    temperature = _interpolate_numeric_stream(
-        records, "temperature", target_seconds
+    speed = _moving_average(
+        _interpolate_numeric_stream(records, "speed", target_seconds),
+        smoothing_window,
     )
-    power = _interpolate_numeric_stream(
-        records, "power", target_seconds, round_to_int=True
+    heart_rate = _moving_average(
+        _interpolate_numeric_stream(
+            records, "heart_rate", target_seconds, round_to_int=True
+        ),
+        smoothing_window,
+    )
+    cadence = _moving_average(
+        _interpolate_numeric_stream(
+            records, "cadence", target_seconds, round_to_int=True
+        ),
+        smoothing_window,
+    )
+    temperature = _moving_average(
+        _interpolate_numeric_stream(records, "temperature", target_seconds),
+        smoothing_window,
+    )
+    power = _moving_average(
+        _interpolate_numeric_stream(
+            records, "power", target_seconds, round_to_int=True
+        ),
+        smoothing_window,
     )
     latitudes, longitudes = _interpolate_positions(records, target_seconds)
 
@@ -382,17 +416,23 @@ def _parse_sessions(fit: FitFile) -> List[Session]:
     return sessions
 
 
-def parse_cycling_fit(path: Path | str) -> CyclingFitData:
+def parse_cycling_fit(
+    path: Path | str, *, smoothing_window: int = 1
+) -> CyclingFitData:
     """Parse a Garmin cycling FIT file into a structured, aligned object.
 
     All numeric record streams are resampled onto the shared timestamp grid
-    emitted by the FIT ``record`` messages. Missing samples are filled via
-    linear interpolation with edge values held constant so downstream consumers
-    can assume fields are present and time aligned.
+    emitted by the FIT ``record`` messages, then smoothed with a centered
+    moving average. Missing samples are filled via linear interpolation with
+    edge values held constant so downstream consumers can assume fields are
+    present and time aligned.
     """
 
     fit_file = FitFile(str(path))
     fit_file.parse()
+
+    if smoothing_window <= 0:
+        raise ValueError("smoothing_window must be positive")
 
     devices = _parse_devices(fit_file)
     records = _parse_records(fit_file)
@@ -404,5 +444,5 @@ def parse_cycling_fit(path: Path | str) -> CyclingFitData:
         devices=devices,
         sessions=sessions,
         laps=laps,
-        records=_align_records(records),
+        records=_align_and_smooth_records(records, smoothing_window),
     )
