@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib.pyplot as plt
+import numpy as np
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
 
 from ride_explorer.coefficient_estimator import (
     PowerBalanceData,
@@ -44,24 +47,52 @@ def _time_series(
     return timestamps, values
 
 
-def _plot_route(ax, positions: Iterable[Tuple[float, float]]) -> None:
+def _plot_route(ax, positions: Iterable[Tuple[float, float, Optional[float]]]) -> None:
     lons: List[float] = []
     lats: List[float] = []
-    for lon, lat in positions:
+    alts: List[float] = []
+    for lon, lat, alt in positions:
         lons.append(lon)
         lats.append(lat)
+        alts.append(alt if alt is not None else np.nan)
 
     if not lons or not lats:
         ax.text(0.5, 0.5, "No GPS data", ha="center", va="center")
         ax.set_axis_off()
         return
 
-    ax.plot(lons, lats, color="tab:blue", linewidth=2)
+    if np.all(np.isnan(alts)) or len(lons) < 2:
+        ax.plot(lons, lats, color="tab:blue", linewidth=2)
+        colorbar = None
+    else:
+        coords = np.column_stack((lons, lats))
+        segments = np.stack([coords[:-1], coords[1:]], axis=1)
+        alt_series = np.asarray(alts, dtype=float)
+        alt_min = np.nanmin(alt_series)
+        alt_max = np.nanmax(alt_series)
+        if np.isclose(alt_min, alt_max):
+            alt_max = alt_min + 1.0
+        norm = Normalize(vmin=alt_min, vmax=alt_max)
+        cmap = plt.get_cmap("plasma")
+        lc = LineCollection(
+            segments,
+            cmap=cmap,
+            norm=norm,
+            linewidths=2.5,
+        )
+        lc.set_array((alt_series[:-1] + alt_series[1:]) / 2)
+        line = ax.add_collection(lc)
+        colorbar = ax.figure.colorbar(line, ax=ax, pad=0.02)
+        colorbar.set_label("Elevation (m)")
+
+    ax.plot(lons, lats, color="black", linewidth=0.8, alpha=0.3)
     ax.set_xlabel("Longitude (°)")
     ax.set_ylabel("Latitude (°)")
-    ax.set_title("Route")
+    ax.set_title("Route (colored by elevation)")
     ax.set_aspect("equal", adjustable="datalim")
     ax.grid(True)
+
+
 
 
 def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
@@ -174,15 +205,17 @@ def _plot_power_balance_terms(
     ax.grid(True)
 
 
-def _build_route_positions(records: Sequence[RecordPoint]) -> List[Tuple[float, float]]:
-    positions: List[Tuple[float, float]] = []
+def _build_route_positions(
+    records: Sequence[RecordPoint],
+) -> List[Tuple[float, float, Optional[float]]]:
+    positions: List[Tuple[float, float, Optional[float]]] = []
     for record in records:
         if record.position is None:
             continue
         lat, lon = record.position
         if lat is None or lon is None:
             continue
-        positions.append((lon, lat))
+        positions.append((lon, lat, record.altitude))
     return positions
 
 
@@ -206,9 +239,11 @@ def _plot_activity(
 
     figures: list[tuple[str, plt.Figure]] = []
 
-    route_fig, route_ax = plt.subplots(figsize=(8, 8))
+    route_positions = _build_route_positions(data.records)
+
+    route_fig, route_ax = plt.subplots(figsize=(10, 8))
     route_fig.suptitle(f"GPS Route: {data.source.name}", fontsize=14)
-    _plot_route(route_ax, _build_route_positions(data.records))
+    _plot_route(route_ax, route_positions)
     route_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("route", route_fig))
 
