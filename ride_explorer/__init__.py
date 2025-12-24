@@ -19,17 +19,31 @@ from .derived_metrics import (
     compute_climbing_rate,
     compute_mechanical_power,
 )
+from .coefficient_estimator import (
+    AIR_DENSITY_KG_PER_M3,
+    PowerBalanceData,
+    estimate_coefficients_from_records,
+    estimate_air_density_from_records,
+    fit_power_balance_parameters,
+    prepare_power_balance_data,
+)
 
 __all__ = [
     "CyclingFitData",
     "DeviceInfo",
+    "PowerBalanceData",
     "DerivedSeries",
     "Lap",
     "RecordPoint",
     "Session",
+    "AIR_DENSITY_KG_PER_M3",
     "compute_acceleration",
     "compute_all_derived_metrics",
     "compute_climbing_rate",
     "compute_mechanical_power",
+    "estimate_coefficients_from_records",
+    "estimate_air_density_from_records",
+    "fit_power_balance_parameters",
+    "prepare_power_balance_data",
     "parse_cycling_fit",
 ]
