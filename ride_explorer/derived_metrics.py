@@ -127,15 +127,14 @@ def compute_all_derived_metrics(
 
 def compute_mechanical_power(
     records: Sequence[RecordPoint], system_mass_kg: float
-) -> DerivedSeries:
-    """Estimate mechanical power needed for acceleration and climbing.
+) -> dict[str, DerivedSeries]:
+    """Estimate mechanical power components for acceleration and climbing.
 
-    Power is calculated as the sum of:
+    Power is split into two series instead of a single summed signal:
 
-    * ``m * g * vertical_speed`` for overcoming gravity while climbing.
-    * ``m * acceleration * speed`` for changing the system's kinetic energy.
-      The speed term is taken directly from the FIT data so no additional
-      interpolation is required for that part of the calculation.
+    * ``climbing_power``: ``m * g * vertical_speed`` to overcome gravity.
+    * ``acceleration_power``: ``m * acceleration * speed`` to change kinetic
+      energy (speed already in m/s from FIT data).
 
     The climbing component is interpolated onto the acceleration time grid so
     the resulting series stays aligned with the speed samples used for the
@@ -152,12 +151,10 @@ def compute_mechanical_power(
 
     Returns
     -------
-    DerivedSeries
-        ``times``: seconds since the first valid speed/altitude samples where
-        both climbing rate and acceleration are defined.
-        ``values``: estimated mechanical power in watts for each timestamp.
-        If derivatives cannot be computed (e.g., too few samples), both arrays
-        are empty.
+    dict[str, DerivedSeries]
+        ``climbing_power`` and ``acceleration_power`` series, each aligned to
+        the acceleration time grid. Empty arrays are returned for both entries
+        if the required derivatives cannot be computed.
     """
 
     if system_mass_kg <= 0:
@@ -170,7 +167,8 @@ def compute_mechanical_power(
     climb_series = compute_climbing_rate(records)
 
     if accel_series.times.size == 0 or climb_series.times.size == 0:
-        return DerivedSeries(times=np.array([]), values=np.array([]))
+        empty = DerivedSeries(times=np.array([]), values=np.array([]))
+        return {"climbing_power": empty, "acceleration_power": empty}
 
     accel_times = accel_series.times
 
@@ -180,19 +178,25 @@ def compute_mechanical_power(
         accel_times <= climb_series.times[-1]
     )
     if not np.any(in_altitude_range):
-        return DerivedSeries(times=np.array([]), values=np.array([]))
+        empty = DerivedSeries(times=np.array([]), values=np.array([]))
+        return {"climbing_power": empty, "acceleration_power": empty}
 
     aligned_times = accel_times[in_altitude_range]
     aligned_speed = speed_series.values[in_altitude_range]
     aligned_accel = accel_series.values[in_altitude_range]
 
     # Interpolate the climbing rate onto the acceleration timeline so both
-    # components can be summed sample-by-sample.
+    # components can be evaluated sample-by-sample.
     aligned_climb_rate = np.interp(
         aligned_times, climb_series.times, climb_series.values
     )
 
-    power_from_grade = system_mass_kg * GRAVITY_M_PER_S2 * aligned_climb_rate
-    power_from_accel = system_mass_kg * aligned_accel * aligned_speed
+    climbing_power = system_mass_kg * GRAVITY_M_PER_S2 * aligned_climb_rate
+    acceleration_power = system_mass_kg * aligned_accel * aligned_speed
 
-    return DerivedSeries(times=aligned_times, values=power_from_grade + power_from_accel)
+    return {
+        "climbing_power": DerivedSeries(times=aligned_times, values=climbing_power),
+        "acceleration_power": DerivedSeries(
+            times=aligned_times, values=acceleration_power
+        ),
+    }
