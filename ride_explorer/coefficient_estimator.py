@@ -210,9 +210,15 @@ def _iteratively_reweighted_fit(
     loss_scale: float,
     max_iterations: int,
     tolerance: float,
+    initial_params: np.ndarray | None = None,
 ) -> np.ndarray:
     weights = base_weights
-    params = _weighted_least_squares(design, target, weights)
+    if initial_params is not None:
+        params = np.asarray(initial_params, dtype=float)
+        if params.shape != (design.shape[1],):
+            raise ValueError("initial_params must match the number of design columns")
+    else:
+        params = _weighted_least_squares(design, target, weights)
 
     for _ in range(max_iterations):
         residuals = design @ params - target
@@ -239,6 +245,7 @@ def fit_power_balance_parameters(
     fixed_efficiency: float = 0.98,
     max_iterations: int = 25,
     tolerance: float = 1e-6,
+    initial_params: np.ndarray | None = None,
 ) -> tuple[float, float, float]:
     """Estimate drivetrain efficiency, rolling resistance, and CdA.
 
@@ -297,6 +304,7 @@ def fit_power_balance_parameters(
         loss_scale=loss_scale,
         max_iterations=max_iterations,
         tolerance=tolerance,
+        initial_params=initial_params,
     )
 
     if include_drivetrain_efficiency:
