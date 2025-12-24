@@ -389,7 +389,7 @@ def _plot_activity(
         residual_mean = float(np.mean(initial_residuals))
         residual_std = float(np.std(initial_residuals))
         if residual_std > 0 and np.isfinite(residual_std):
-            outlier_mask = np.abs(initial_residuals - residual_mean) > residual_std
+            outlier_mask = np.abs(initial_residuals - residual_mean) > 2 * residual_std
             estimation_weights[outlier_mask] = 0
 
         try:
