@@ -133,10 +133,10 @@ def prepare_power_balance_data(
     ):
         raise ValueError("Aligned derived metrics must match the record timeline")
 
-    rolling_term = system_mass_kg * GRAVITY_M_PER_S2 * speed_values
-    aero_term = 0.5 * air_density * np.power(speed_values, 3)
-    gravity_power = system_mass_kg * GRAVITY_M_PER_S2 * climb_rates
-    acceleration_power = system_mass_kg * acceleration_rates * speed_values
+    rolling_term = -system_mass_kg * GRAVITY_M_PER_S2 * speed_values
+    aero_term = -0.5 * air_density * np.power(speed_values, 3)
+    gravity_power = -system_mass_kg * GRAVITY_M_PER_S2 * climb_rates
+    acceleration_power = -system_mass_kg * acceleration_rates * speed_values
 
     mask = np.isfinite(power_values) & np.isfinite(rolling_term) & np.isfinite(
         aero_term
