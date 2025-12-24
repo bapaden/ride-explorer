@@ -386,7 +386,11 @@ def _plot_activity(
         initial_residuals = _power_balance_residual(
             power_balance_data, eta, crr, cda
         )
-        estimation_weights[np.abs(initial_residuals) > 200] = 0
+        residual_mean = float(np.mean(initial_residuals))
+        residual_std = float(np.std(initial_residuals))
+        if residual_std > 0 and np.isfinite(residual_std):
+            outlier_mask = np.abs(initial_residuals - residual_mean) > residual_std
+            estimation_weights[outlier_mask] = 0
 
         try:
             if estimate_parameters:
