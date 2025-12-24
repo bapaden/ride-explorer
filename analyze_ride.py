@@ -332,6 +332,7 @@ def _plot_activity(
     cda: float,
     estimate_parameters: bool,
     estimate_efficiency: bool,
+    residual_std_multiplier: float,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -389,7 +390,8 @@ def _plot_activity(
         residual_mean = float(np.mean(initial_residuals))
         residual_std = float(np.std(initial_residuals))
         if residual_std > 0 and np.isfinite(residual_std):
-            outlier_mask = np.abs(initial_residuals - residual_mean) > 2 * residual_std
+            threshold = residual_std_multiplier * residual_std
+            outlier_mask = np.abs(initial_residuals - residual_mean) > threshold
             estimation_weights[outlier_mask] = 0
 
         try:
@@ -537,6 +539,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--residual_std_multiplier",
+        type=float,
+        default=2.0,
+        help=(
+            "Multiplier applied to residual standard deviation for zero-weighting "
+            "outlier samples (default: 2.0)."
+        ),
+    )
+    parser.add_argument(
         "--cda",
         type=float,
         default=0.32,
@@ -602,6 +613,7 @@ def main() -> None:
         cda=args.cda,
         estimate_parameters=args.estimate_parameters,
         estimate_efficiency=args.estimate_efficiency,
+        residual_std_multiplier=args.residual_std_multiplier,
     )
 
 
