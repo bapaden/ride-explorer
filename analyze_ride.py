@@ -382,6 +382,11 @@ def _plot_activity(
         if power_balance_data.cadence is not None:
             estimation_weights[power_balance_data.cadence < 25] = 0
 
+        initial_residuals = _power_balance_residual(
+            power_balance_data, eta, crr, cda
+        )
+        estimation_weights[np.abs(initial_residuals) > 200] = 0
+
         try:
             if estimate_parameters:
                 estimated_params = fit_power_balance_parameters(
