@@ -13,6 +13,7 @@ from matplotlib.colors import Normalize
 
 from ride_explorer.coefficient_estimator import (
     PowerBalanceData,
+    fit_power_balance_parameters,
     prepare_power_balance_data,
 )
 from ride_explorer.derived_metrics import compute_mechanical_power
@@ -205,6 +206,55 @@ def _plot_power_balance_terms(
     ax.grid(True)
 
 
+def _plot_residuals(
+    ax,
+    power_data: PowerBalanceData | None,
+    residuals: np.ndarray | None,
+    weights: np.ndarray | None,
+    *,
+    eta: float,
+    crr: float,
+    cda: float,
+    loss: str,
+    error_message: str | None = None,
+) -> None:
+    if error_message:
+        ax.text(0.5, 0.5, error_message, ha="center", va="center")
+        ax.set_axis_off()
+        return
+
+    if power_data is None or power_data.sample_count == 0 or residuals is None:
+        ax.text(0.5, 0.5, "No residuals to display", ha="center", va="center")
+        ax.set_axis_off()
+        return
+
+    times = power_data.timestamps
+    ax.plot(times, residuals, label="Power balance residual (W)")
+    if weights is not None:
+        zero_weight_mask = weights <= 0
+        if np.any(zero_weight_mask):
+            ax.scatter(
+                times[zero_weight_mask],
+                residuals[zero_weight_mask],
+                label="Zero-weighted samples",
+                color="tab:red",
+                s=10,
+                alpha=0.8,
+            )
+
+    ax.axhline(0, color="black", linewidth=1, linestyle="--", alpha=0.7)
+    ax.set_xlabel("Time (s)")
+    ax.set_ylabel("Residual (W)")
+    ax.set_title(
+        (
+            "Residuals "
+            f"(η={eta:.3f}, Crr={crr:.4f}, CdA={cda:.3f}, loss={loss})"
+        )
+    )
+    ax.legend(loc="upper right")
+    ax.grid(True)
+
+
 def _build_route_positions(
     records: Sequence[RecordPoint],
 ) -> List[Tuple[float, float, Optional[float]]]:
@@ -225,6 +275,18 @@ def _figure_output_path(base: Path, suffix: str) -> Path:
     return base.with_name(f"{base.name}_{suffix}.png")
 
 
+def _power_balance_residual(
+    power_data: PowerBalanceData, eta: float, crr: float, cda: float
+) -> np.ndarray:
+    return (
+        eta * power_data.crank_power
+        + crr * power_data.rolling_term
+        + cda * power_data.aero_term
+        + power_data.gravity_power
+        + power_data.acceleration_power
+    )
+
+
 def _plot_activity(
     data: CyclingFitData,
     system_mass_kg: float,
@@ -234,6 +296,7 @@ def _plot_activity(
     eta: float,
     crr: float,
     cda: float,
+    loss: str,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -265,6 +328,14 @@ def _plot_activity(
 
     power_balance_data: PowerBalanceData | None = None
     power_balance_error: str | None = None
+    estimated_params: tuple[float, float, float] | None = None
+    estimation_weights: np.ndarray | None = None
+    residuals: np.ndarray | None = None
+    plot_eta = eta
+    plot_crr = crr
+    plot_cda = cda
+    loss_name = "l2"
+    estimation_stats: dict[str, float] | None = None
     try:
         power_balance_data = prepare_power_balance_data(
             data.records, system_mass_kg=system_mass_kg
@@ -272,24 +343,95 @@ def _plot_activity(
     except ValueError as exc:
         power_balance_error = str(exc)
 
+    if power_balance_data is not None and power_balance_error is None:
+        estimation_weights = np.ones(power_balance_data.sample_count, dtype=float)
+        estimation_weights[power_balance_data.crank_power < 50] = 0
+        if power_balance_data.cadence is not None:
+            estimation_weights[power_balance_data.cadence < 25] = 0
+
+        try:
+            estimated_params = fit_power_balance_parameters(
+                data=power_balance_data,
+                weights=estimation_weights,
+                loss=loss,
+            )
+            plot_eta, plot_crr, plot_cda = estimated_params
+            loss_name = loss
+            residuals = _power_balance_residual(
+                power_balance_data, plot_eta, plot_crr, plot_cda
+            )
+
+            nonzero_weights = (
+                estimation_weights is not None
+                and np.count_nonzero(estimation_weights) > 0
+            )
+            if nonzero_weights:
+                weighted_rms = np.sqrt(
+                    np.average(
+                        np.square(residuals),
+                        weights=np.clip(estimation_weights, 0, None),
+                    )
+                )
+            else:
+                weighted_rms = float("nan")
+
+            estimation_stats = {
+                "samples": power_balance_data.sample_count,
+                "weighted_samples": int(np.count_nonzero(estimation_weights)),
+                "residual_mean": float(np.mean(residuals)),
+                "residual_std": float(np.std(residuals)),
+                "weighted_rms": weighted_rms,
+            }
+
+            print(
+                "Estimated parameters "
+                f"(loss={loss_name}): η={plot_eta:.3f}, Crr={plot_crr:.4f}, "
+                f"CdA={plot_cda:.3f}"
+            )
+            print(
+                "Estimation stats: "
+                f"samples={estimation_stats['samples']}, "
+                f"weighted_samples={estimation_stats['weighted_samples']}, "
+                f"residual_mean={estimation_stats['residual_mean']:.2f} W, "
+                f"residual_std={estimation_stats['residual_std']:.2f} W, "
+                f"weighted_rms={estimation_stats['weighted_rms']:.2f} W"
+            )
+        except Exception as exc:  # pragma: no cover - defensive user-facing handler
+            power_balance_error = f"Coefficient estimation failed: {exc}"
+
     power_balance_fig, power_balance_ax = plt.subplots(figsize=(12, 6))
     power_balance_fig.suptitle(
         (
-            f"Power balance (CdA={cda:.3f}, Crr={crr:.4f}, η={eta:.2f}): "
-            f"{data.source.name}"
+            f"Power balance (CdA={plot_cda:.3f}, Crr={plot_crr:.4f}, "
+            f"η={plot_eta:.2f}): {data.source.name}"
         ),
         fontsize=14,
     )
     _plot_power_balance_terms(
         power_balance_ax,
         power_balance_data,
-        eta=eta,
-        crr=crr,
-        cda=cda,
+        eta=plot_eta,
+        crr=plot_crr,
+        cda=plot_cda,
         error_message=power_balance_error,
     )
     power_balance_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("power_balance", power_balance_fig))
+
+    residual_fig, residual_ax = plt.subplots(figsize=(12, 4))
+    _plot_residuals(
+        residual_ax,
+        power_balance_data,
+        residuals,
+        estimation_weights,
+        eta=plot_eta,
+        crr=plot_crr,
+        cda=plot_cda,
+        loss=loss_name,
+        error_message=power_balance_error,
+    )
+    residual_fig.tight_layout()
+    figures.append(("residuals", residual_fig))
 
     if output:
         for suffix, fig in figures:
@@ -352,6 +494,12 @@ def main() -> None:
         default=0.97,
         help="Drivetrain efficiency (0–1) used for power balance calculations.",
     )
+    parser.add_argument(
+        "--loss",
+        choices=["l2", "huber", "cauchy", "tukey"],
+        default="l2",
+        help="Loss function to use for coefficient estimation (default: l2).",
+    )
 
     args = parser.parse_args()
 
@@ -379,6 +527,7 @@ def main() -> None:
         eta=args.eta,
         crr=args.crr,
         cda=args.cda,
+        loss=args.loss,
     )
 
 
