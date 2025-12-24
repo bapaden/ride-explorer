@@ -19,11 +19,10 @@ from .derived_metrics import (
     compute_climbing_rate,
     compute_mechanical_power,
 )
+from .air_density import AIR_DENSITY_KG_PER_M3, estimate_air_density_from_records
 from .coefficient_estimator import (
-    AIR_DENSITY_KG_PER_M3,
     PowerBalanceData,
     estimate_coefficients_from_records,
-    estimate_air_density_from_records,
     fit_power_balance_parameters,
     prepare_power_balance_data,
 )
