@@ -33,19 +33,20 @@ class DerivedSeries:
 
 
 def _extract_numeric_series(
-    records: Sequence[RecordPoint], attribute: str
+    records: Sequence[RecordPoint], attribute: str, *, time_origin: float | None = None
 ) -> DerivedSeries:
     """Convert a ``RecordPoint`` attribute stream into aligned NumPy arrays.
 
     Only records that contain both a timestamp and the requested attribute are
     kept; missing entries are skipped entirely. The timestamps are shifted to
-    start at zero seconds to improve numerical stability for finite differences.
+    start at zero seconds to improve numerical stability for finite differences,
+    using ``time_origin`` when provided or the first valid timestamp otherwise.
     """
 
     times: list[float] = []
     values: list[float] = []
 
-    first_timestamp: float | None = None
+    first_timestamp: float | None = time_origin
     for record in records:
         ts = record.timestamp
         value = getattr(record, attribute)
@@ -53,14 +54,18 @@ def _extract_numeric_series(
             # Drop records that cannot contribute to the derivative calculation.
             continue
 
-        first_timestamp = first_timestamp or ts.timestamp()
+        if first_timestamp is None:
+            first_timestamp = ts.timestamp()
+
         times.append(ts.timestamp() - first_timestamp)
         values.append(float(value))
 
     return DerivedSeries(times=np.asarray(times), values=np.asarray(values))
 
 
-def compute_climbing_rate(records: Sequence[RecordPoint]) -> DerivedSeries:
+def compute_climbing_rate(
+    records: Sequence[RecordPoint], *, time_origin: float | None = None
+) -> DerivedSeries:
     """Compute climbing rate (vertical speed) in m/s using finite differences.
 
     The calculation applies NumPy's ``gradient`` to the altitude stream using the
@@ -76,6 +81,16 @@ def compute_climbing_rate(records: Sequence[RecordPoint]) -> DerivedSeries:
         Ordered sequence of :class:`ride_explorer.fit_parser.RecordPoint`
         instances as returned by :func:`ride_explorer.fit_parser.parse_cycling_fit`.
 
+    Parameters
+    ----------
+    records:
+        Ordered sequence of :class:`ride_explorer.fit_parser.RecordPoint`
+        instances as returned by :func:`ride_explorer.fit_parser.parse_cycling_fit`.
+    time_origin:
+        Optional absolute timestamp (seconds since epoch) used as the zero
+        reference for the returned ``times`` array. When omitted, the first valid
+        timestamp in the altitude series is used.
+
     Returns
     -------
     DerivedSeries
@@ -84,7 +99,7 @@ def compute_climbing_rate(records: Sequence[RecordPoint]) -> DerivedSeries:
         If fewer than two valid samples exist, both arrays are empty.
     """
 
-    series = _extract_numeric_series(records, "altitude")
+    series = _extract_numeric_series(records, "altitude", time_origin=time_origin)
     if series.times.size < 2:
         # Derivatives require at least two samples; return empty arrays otherwise.
         return DerivedSeries(times=np.array([]), values=np.array([]))
@@ -93,16 +108,28 @@ def compute_climbing_rate(records: Sequence[RecordPoint]) -> DerivedSeries:
     return DerivedSeries(times=series.times, values=climbing_rate)
 
 
-def compute_acceleration(records: Sequence[RecordPoint]) -> DerivedSeries:
+def compute_acceleration(
+    records: Sequence[RecordPoint], *, time_origin: float | None = None
+) -> DerivedSeries:
     """Compute acceleration (m/s²) from speed and time using finite differences.
 
     This mirrors :func:`compute_climbing_rate` but operates on the ``speed``
     attribute. FIT speed values are already in meters per second, so the
     resulting derivative directly represents acceleration without unit
     conversion.
+
+    Parameters
+    ----------
+    records:
+        Ordered sequence of :class:`ride_explorer.fit_parser.RecordPoint`
+        instances as returned by :func:`ride_explorer.fit_parser.parse_cycling_fit`.
+    time_origin:
+        Optional absolute timestamp (seconds since epoch) used as the zero
+        reference for the returned ``times`` array. When omitted, the first valid
+        timestamp in the speed series is used.
     """
 
-    series = _extract_numeric_series(records, "speed")
+    series = _extract_numeric_series(records, "speed", time_origin=time_origin)
     if series.times.size < 2:
         return DerivedSeries(times=np.array([]), values=np.array([]))
 
@@ -111,22 +138,34 @@ def compute_acceleration(records: Sequence[RecordPoint]) -> DerivedSeries:
 
 
 def compute_all_derived_metrics(
-    records: Sequence[RecordPoint],
+    records: Sequence[RecordPoint], *, time_origin: float | None = None
 ) -> dict[str, DerivedSeries]:
     """Compute all available derived metrics for a given record stream.
 
     The helper makes it easy for callers to fetch multiple derived quantities in
     one pass without recomputing the base series extraction logic.
+
+    Parameters
+    ----------
+    records:
+        Ordered sequence of :class:`ride_explorer.fit_parser.RecordPoint`.
+    time_origin:
+        Optional absolute timestamp (seconds since epoch) used as the zero
+        reference for the returned ``times`` arrays. When omitted, each series
+        uses its own first valid timestamp.
     """
 
     return {
-        "climbing_rate": compute_climbing_rate(records),
-        "acceleration": compute_acceleration(records),
+        "climbing_rate": compute_climbing_rate(records, time_origin=time_origin),
+        "acceleration": compute_acceleration(records, time_origin=time_origin),
     }
 
 
 def compute_mechanical_power(
-    records: Sequence[RecordPoint], system_mass_kg: float
+    records: Sequence[RecordPoint],
+    system_mass_kg: float,
+    *,
+    time_origin: float | None = None,
 ) -> dict[str, DerivedSeries]:
     """Estimate mechanical power components for acceleration and climbing.
 
@@ -148,6 +187,10 @@ def compute_mechanical_power(
         instances as returned by :func:`ride_explorer.fit_parser.parse_cycling_fit`.
     system_mass_kg:
         Combined rider + bike mass in kilograms.
+    time_origin:
+        Optional absolute timestamp (seconds since epoch) used as the zero
+        reference for the returned ``times`` arrays. When omitted, the first
+        valid timestamp in each series is used.
 
     Returns
     -------
@@ -162,9 +205,11 @@ def compute_mechanical_power(
 
     # Acceleration uses the speed stream; the speed samples define the time grid
     # for the final power calculation.
-    speed_series = _extract_numeric_series(records, "speed")
-    accel_series = compute_acceleration(records)
-    climb_series = compute_climbing_rate(records)
+    speed_series = _extract_numeric_series(
+        records, "speed", time_origin=time_origin
+    )
+    accel_series = compute_acceleration(records, time_origin=time_origin)
+    climb_series = compute_climbing_rate(records, time_origin=time_origin)
 
     if accel_series.times.size == 0 or climb_series.times.size == 0:
         empty = DerivedSeries(times=np.array([]), values=np.array([]))
