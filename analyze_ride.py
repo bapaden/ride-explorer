@@ -228,17 +228,33 @@ def _plot_residuals(
         return
 
     times = power_data.timestamps
-    ax.plot(times, residuals, label="Power balance residual (W)")
-    if weights is not None:
+    marker_style = {"marker": "x", "s": 25, "alpha": 0.9}
+    if weights is None:
+        ax.scatter(
+            times,
+            residuals,
+            label="Power balance residual (W)",
+            color="tab:blue",
+            **marker_style,
+        )
+    else:
         zero_weight_mask = weights <= 0
+        inlier_mask = ~zero_weight_mask
+        if np.any(inlier_mask):
+            ax.scatter(
+                times[inlier_mask],
+                residuals[inlier_mask],
+                label="Weighted samples",
+                color="tab:blue",
+                **marker_style,
+            )
         if np.any(zero_weight_mask):
             ax.scatter(
                 times[zero_weight_mask],
                 residuals[zero_weight_mask],
                 label="Zero-weighted samples",
                 color="tab:red",
-                s=10,
-                alpha=0.8,
+                **marker_style,
             )
 
     ax.axhline(0, color="black", linewidth=1, linestyle="--", alpha=0.7)
