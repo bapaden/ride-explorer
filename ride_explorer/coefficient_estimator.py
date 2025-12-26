@@ -54,6 +54,20 @@ class PowerBalanceData:
         return int(self.crank_power.size)
 
 
+@dataclass(frozen=True)
+class PowerBalanceEstimation:
+    """Full estimation result including weights and residuals."""
+
+    data: PowerBalanceData
+    weights: np.ndarray
+    residuals: np.ndarray
+    eta: float
+    crr: float
+    cda: float
+    elevation_lag_s: float
+    stats: dict[str, float]
+
+
 def _timestamp_offsets(records: Sequence[RecordPoint]) -> np.ndarray:
     timestamps = np.array(
         [record.timestamp.timestamp() for record in records if record.timestamp],
@@ -217,6 +231,18 @@ def prepare_power_balance_data(
     )
 
 
+def _power_balance_residual(
+    data: PowerBalanceData, *, eta: float, crr: float, cda: float
+) -> np.ndarray:
+    return (
+        eta * data.crank_power
+        + crr * data.rolling_term
+        + cda * data.aero_term
+        + data.gravity_power
+        + data.acceleration_power
+    )
+
+
 def _weighted_least_squares(
     design: np.ndarray, target: np.ndarray, weights: np.ndarray
 ) -> np.ndarray:
@@ -321,7 +347,11 @@ def estimate_coefficients_from_records(
     include_rolling_resistance: bool = True,
     fixed_efficiency: float = 1.0,
     fixed_crr: float = 0.004,
+    initial_cda: float = 0.32,
+    residual_outlier_limit: float | None = None,
     elevation_lag_s: float = 0.0,
+    estimate_elevation_lag: bool = False,
+    elevation_lag_bound: float = 0.0,
 ) -> tuple[float, float, float]:
     """Driver helper to fit coefficients directly from FIT records.
 
@@ -333,14 +363,55 @@ def estimate_coefficients_from_records(
     strategy. Setting ``use_record_air_density`` to ``True`` automatically
     estimates air density from temperature and altitude streams when available.
     ``elevation_lag_s`` shifts the altitude stream before computing climbing
-    rate to compensate for delayed elevation sensors.
+    rate to compensate for delayed elevation sensors. When ``estimate_elevation_lag``
+    is ``True``, a golden-section search between zero and ``elevation_lag_bound`` is
+    used to select the lag that minimizes weighted RMS residual.
     """
 
-    if use_record_air_density:
-        air_density = estimate_air_density_from_records(
-            records, fallback_air_density=air_density
-        )
+    result = estimate_power_balance(
+        records,
+        system_mass_kg,
+        air_density=air_density,
+        use_record_air_density=use_record_air_density,
+        cadence_weight_threshold=cadence_weight_threshold,
+        power_weight_threshold=power_weight_threshold,
+        weights=weights,
+        include_drivetrain_efficiency=include_drivetrain_efficiency,
+        include_rolling_resistance=include_rolling_resistance,
+        fixed_efficiency=fixed_efficiency,
+        fixed_crr=fixed_crr,
+        initial_cda=initial_cda,
+        residual_outlier_limit=residual_outlier_limit,
+        elevation_lag_s=elevation_lag_s,
+        estimate_elevation_lag=estimate_elevation_lag,
+        elevation_lag_bound=elevation_lag_bound,
+    )
+    return result.eta, result.crr, result.cda
 
+
+def _weighted_rms(residuals: np.ndarray, weights: np.ndarray) -> float:
+    clipped = np.clip(weights, 0, None)
+    if np.count_nonzero(clipped) == 0:
+        return float("inf")
+    return float(np.sqrt(np.average(np.square(residuals), weights=clipped)))
+
+
+def _estimation_for_lag(
+    records: Sequence[RecordPoint],
+    system_mass_kg: float,
+    *,
+    air_density: float,
+    cadence_weight_threshold: int | None,
+    power_weight_threshold: float | None,
+    weights: np.ndarray | None,
+    include_drivetrain_efficiency: bool,
+    include_rolling_resistance: bool,
+    fixed_efficiency: float,
+    fixed_crr: float,
+    initial_cda: float,
+    residual_outlier_limit: float | None,
+    elevation_lag_s: float,
+) -> PowerBalanceEstimation:
     data = prepare_power_balance_data(
         records=records,
         system_mass_kg=system_mass_kg,
@@ -350,18 +421,22 @@ def estimate_coefficients_from_records(
 
     base_weights = np.ones(data.sample_count, dtype=float)
     if power_weight_threshold is not None:
-        power_mask = data.crank_power >= power_weight_threshold
-        base_weights = base_weights * power_mask.astype(float)
+        base_weights *= (data.crank_power >= power_weight_threshold).astype(float)
     if data.cadence is not None and cadence_weight_threshold is not None:
-        cadence_mask = data.cadence >= cadence_weight_threshold
-        base_weights = base_weights * cadence_mask.astype(float)
+        base_weights *= (data.cadence >= cadence_weight_threshold).astype(float)
 
     if weights is not None:
         if weights.shape != base_weights.shape:
             raise ValueError("weights must match the number of samples in data")
         base_weights *= weights
 
-    return fit_power_balance_parameters(
+    if residual_outlier_limit is not None and residual_outlier_limit > 0:
+        initial_residuals = _power_balance_residual(
+            data, eta=fixed_efficiency, crr=fixed_crr, cda=initial_cda
+        )
+        base_weights[np.abs(initial_residuals) > residual_outlier_limit] = 0
+
+    eta, crr, cda = fit_power_balance_parameters(
         data=data,
         weights=base_weights,
         include_drivetrain_efficiency=include_drivetrain_efficiency,
@@ -369,3 +444,129 @@ def estimate_coefficients_from_records(
         fixed_efficiency=fixed_efficiency,
         fixed_crr=fixed_crr,
     )
+
+    residuals = _power_balance_residual(data, eta=eta, crr=crr, cda=cda)
+    stats = {
+        "samples": data.sample_count,
+        "weighted_samples": int(np.count_nonzero(base_weights)),
+        "residual_mean": float(np.mean(residuals)),
+        "residual_std": float(np.std(residuals)),
+        "weighted_rms": _weighted_rms(residuals, base_weights),
+    }
+
+    return PowerBalanceEstimation(
+        data=data,
+        weights=base_weights,
+        residuals=residuals,
+        eta=float(eta),
+        crr=float(crr),
+        cda=float(cda),
+        elevation_lag_s=float(elevation_lag_s),
+        stats=stats,
+    )
+
+
+def estimate_power_balance(
+    records: Sequence[RecordPoint],
+    system_mass_kg: float,
+    *,
+    air_density: float = AIR_DENSITY_KG_PER_M3,
+    use_record_air_density: bool = False,
+    cadence_weight_threshold: int | None = 30,
+    power_weight_threshold: float | None = 50.0,
+    weights: np.ndarray | None = None,
+    include_drivetrain_efficiency: bool = True,
+    include_rolling_resistance: bool = True,
+    fixed_efficiency: float = 1.0,
+    fixed_crr: float = 0.004,
+    initial_cda: float = 0.32,
+    residual_outlier_limit: float | None = None,
+    elevation_lag_s: float = 0.0,
+    estimate_elevation_lag: bool = False,
+    elevation_lag_bound: float = 0.0,
+) -> PowerBalanceEstimation:
+    """Estimate coefficients and residuals with optional elevation lag search.
+
+    The helper performs coefficient estimation for a fixed elevation lag or runs
+    a golden-section search between zero and ``elevation_lag_bound`` to select
+    the lag that minimizes the weighted RMS residual. Residual outlier gating
+    uses an absolute wattage limit instead of standard-deviation scaling.
+    """
+
+    if use_record_air_density:
+        air_density = estimate_air_density_from_records(
+            records, fallback_air_density=air_density
+        )
+
+    best_result = _estimation_for_lag(
+        records,
+        system_mass_kg,
+        air_density=air_density,
+        cadence_weight_threshold=cadence_weight_threshold,
+        power_weight_threshold=power_weight_threshold,
+        weights=weights,
+        include_drivetrain_efficiency=include_drivetrain_efficiency,
+        include_rolling_resistance=include_rolling_resistance,
+        fixed_efficiency=fixed_efficiency,
+        fixed_crr=fixed_crr,
+        initial_cda=initial_cda,
+        residual_outlier_limit=residual_outlier_limit,
+        elevation_lag_s=0.0,
+    )
+
+    if not estimate_elevation_lag or elevation_lag_bound <= 0:
+        return best_result
+
+    golden_ratio = (1 + np.sqrt(5)) / 2
+    inv_phi = 1 / golden_ratio
+    inv_phi2 = inv_phi * inv_phi
+    a, b = 0.0, float(elevation_lag_bound)
+    h = b - a
+
+    if h <= 0:
+        return best_result
+
+    n = int(np.ceil(np.log((1e-2) / h) / np.log(inv_phi)))
+    c = a + inv_phi2 * h
+    d = a + inv_phi * h
+
+    def objective(lag: float) -> float:
+        nonlocal best_result
+        result = _estimation_for_lag(
+            records,
+            system_mass_kg,
+            air_density=air_density,
+            cadence_weight_threshold=cadence_weight_threshold,
+            power_weight_threshold=power_weight_threshold,
+            weights=weights,
+            include_drivetrain_efficiency=include_drivetrain_efficiency,
+            include_rolling_resistance=include_rolling_resistance,
+            fixed_efficiency=fixed_efficiency,
+            fixed_crr=fixed_crr,
+            initial_cda=initial_cda,
+            residual_outlier_limit=residual_outlier_limit,
+            elevation_lag_s=lag,
+        )
+        if result.stats["weighted_rms"] < best_result.stats["weighted_rms"]:
+            best_result = result
+        return result.stats["weighted_rms"]
+
+    fc = objective(c)
+    fd = objective(d)
+    for _ in range(max(n - 1, 0)):
+        if fc < fd:
+            b = d
+            d = c
+            fd = fc
+            h = inv_phi * h
+            c = a + inv_phi2 * h
+            fc = objective(c)
+        else:
+            a = c
+            c = d
+            fc = fd
+            h = inv_phi * h
+            d = a + inv_phi * h
+            fd = objective(d)
+
+    return best_result

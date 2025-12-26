@@ -11,11 +11,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 
 from ride_explorer.arguments import build_argument_parser
-from ride_explorer.coefficient_estimator import (
-    PowerBalanceData,
-    fit_power_balance_parameters,
-    prepare_power_balance_data,
-)
+from ride_explorer.coefficient_estimator import PowerBalanceData, estimate_power_balance
 from ride_explorer.derived_metrics import compute_mechanical_power
 from ride_explorer.fit_parser import CyclingFitData, RecordPoint, parse_cycling_fit
 
@@ -325,18 +321,6 @@ def _figure_output_path(base: Path, suffix: str) -> Path:
     return base.with_name(f"{base.name}_{suffix}.png")
 
 
-def _power_balance_residual(
-    power_data: PowerBalanceData, eta: float, crr: float, cda: float
-) -> np.ndarray:
-    return (
-        eta * power_data.crank_power
-        + crr * power_data.rolling_term
-        + cda * power_data.aero_term
-        + power_data.gravity_power
-        + power_data.acceleration_power
-    )
-
-
 def _plot_activity(
     data: CyclingFitData,
     system_mass_kg: float,
@@ -349,8 +333,9 @@ def _plot_activity(
     estimate_parameters: bool,
     estimate_efficiency: bool,
     estimate_crr: bool,
-    residual_std_multiplier: float,
-    elevation_lag_s: float,
+    residual_outlier_limit: float | None,
+    estimate_elevation_lag: bool,
+    elevation_lag_bound: float,
     apply_min_power_weighting: bool,
     min_power_threshold: float,
     apply_min_cadence_weighting: bool,
@@ -374,109 +359,71 @@ def _plot_activity(
     metrics_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("metrics", metrics_fig))
 
-    power_fig, power_ax = plt.subplots(figsize=(12, 6))
-    power_fig.suptitle(
-        f"Derived Power (system mass: {system_mass_kg} kg): {data.source.name}",
-        fontsize=14,
-    )
-    power_series = compute_mechanical_power(
-        data.records, system_mass_kg, elevation_lag_s=elevation_lag_s
-    )
-    _plot_power_components(power_ax, power_series)
-    power_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-    figures.append(("power", power_fig))
-
     power_balance_data: PowerBalanceData | None = None
     power_balance_error: str | None = None
-    estimated_params: tuple[float, float, float] | None = None
     estimation_weights: np.ndarray | None = None
     residuals: np.ndarray | None = None
     plot_eta = eta
     plot_crr = crr
     plot_cda = cda
     estimation_stats: dict[str, float] | None = None
+    selected_elevation_lag = 0.0
     try:
-        power_balance_data = prepare_power_balance_data(
+        estimation_result = estimate_power_balance(
             data.records,
-            system_mass_kg=system_mass_kg,
-            elevation_lag_s=elevation_lag_s,
+            system_mass_kg,
+            initial_cda=cda,
+            include_drivetrain_efficiency=estimate_efficiency,
+            include_rolling_resistance=estimate_crr,
+            fixed_efficiency=eta,
+            fixed_crr=crr,
+            residual_outlier_limit=residual_outlier_limit,
+            power_weight_threshold=min_power_threshold
+            if apply_min_power_weighting
+            else None,
+            cadence_weight_threshold=min_cadence_threshold
+            if apply_min_cadence_weighting
+            else None,
+            estimate_elevation_lag=estimate_elevation_lag,
+            elevation_lag_bound=elevation_lag_bound,
+        )
+        power_balance_data = estimation_result.data
+        estimation_weights = estimation_result.weights
+        residuals = estimation_result.residuals
+        plot_eta = estimation_result.eta
+        plot_crr = estimation_result.crr
+        plot_cda = estimation_result.cda
+        estimation_stats = estimation_result.stats
+        selected_elevation_lag = estimation_result.elevation_lag_s
+        print(
+            "Selected elevation lag "
+            f"{selected_elevation_lag:.3f} s (weighted RMS residual: "
+            f"{estimation_stats['weighted_rms']:.2f} W)"
+        )
+        print(
+            "Estimation stats: "
+            f"samples={estimation_stats['samples']}, "
+            f"weighted_samples={estimation_stats['weighted_samples']}, "
+            f"residual_mean={estimation_stats['residual_mean']:.2f} W, "
+            f"residual_std={estimation_stats['residual_std']:.2f} W, "
+            f"weighted_rms={estimation_stats['weighted_rms']:.2f} W"
         )
     except ValueError as exc:
         power_balance_error = str(exc)
+    except Exception as exc:  # pragma: no cover - defensive user-facing handler
+        power_balance_error = f"Coefficient estimation failed: {exc}"
 
-    if power_balance_data is not None and power_balance_error is None:
-        estimation_weights = np.ones(power_balance_data.sample_count, dtype=float)
-        if apply_min_power_weighting:
-            estimation_weights[power_balance_data.crank_power < min_power_threshold] = 0
-        if apply_min_cadence_weighting and power_balance_data.cadence is not None:
-            estimation_weights[power_balance_data.cadence < min_cadence_threshold] = 0
-
-        initial_residuals = _power_balance_residual(
-            power_balance_data, eta, crr, cda
-        )
-        residual_mean = float(np.mean(initial_residuals))
-        residual_std = float(np.std(initial_residuals))
-        if residual_std > 0 and np.isfinite(residual_std):
-            threshold = residual_std_multiplier * residual_std
-            outlier_mask = np.abs(initial_residuals - residual_mean) > threshold
-            estimation_weights[outlier_mask] = 0
-
-        try:
-            if estimate_parameters:
-                estimated_params = fit_power_balance_parameters(
-                    data=power_balance_data,
-                    weights=estimation_weights,
-                    include_drivetrain_efficiency=estimate_efficiency,
-                    include_rolling_resistance=estimate_crr,
-                    fixed_efficiency=eta,
-                    fixed_crr=crr,
-                )
-                plot_eta, plot_crr, plot_cda = estimated_params
-                print(
-                    "Estimated parameters "
-                    f"η={plot_eta:.3f}, Crr={plot_crr:.4f}, CdA={plot_cda:.3f}"
-                )
-            else:
-                print(
-                    "Skipping estimation; using provided parameters "
-                    f"η={plot_eta:.3f}, Crr={plot_crr:.4f}, CdA={plot_cda:.3f}"
-                )
-            residuals = _power_balance_residual(
-                power_balance_data, plot_eta, plot_crr, plot_cda
-            )
-
-            nonzero_weights = (
-                estimation_weights is not None
-                and np.count_nonzero(estimation_weights) > 0
-            )
-            if nonzero_weights:
-                weighted_rms = np.sqrt(
-                    np.average(
-                        np.square(residuals),
-                        weights=np.clip(estimation_weights, 0, None),
-                    )
-                )
-            else:
-                weighted_rms = float("nan")
-
-            estimation_stats = {
-                "samples": power_balance_data.sample_count,
-                "weighted_samples": int(np.count_nonzero(estimation_weights)),
-                "residual_mean": float(np.mean(residuals)),
-                "residual_std": float(np.std(residuals)),
-                "weighted_rms": weighted_rms,
-            }
-
-            print(
-                "Estimation stats: "
-                f"samples={estimation_stats['samples']}, "
-                f"weighted_samples={estimation_stats['weighted_samples']}, "
-                f"residual_mean={estimation_stats['residual_mean']:.2f} W, "
-                f"residual_std={estimation_stats['residual_std']:.2f} W, "
-                f"weighted_rms={estimation_stats['weighted_rms']:.2f} W"
-            )
-        except Exception as exc:  # pragma: no cover - defensive user-facing handler
-            power_balance_error = f"Coefficient estimation failed: {exc}"
+    power_fig, power_ax = plt.subplots(figsize=(12, 6))
+    power_fig.suptitle(
+        f"Derived Power (system mass: {system_mass_kg} kg): {data.source.name}",
+        fontsize=14,
+    )
+    power_series = compute_mechanical_power(
+        data.records, system_mass_kg, elevation_lag_s=selected_elevation_lag
+    )
+    _plot_power_components(power_ax, power_series)
+    power_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    figures.append(("power", power_fig))
 
     power_balance_fig, power_balance_ax = plt.subplots(figsize=(12, 6))
     power_balance_fig.suptitle(
@@ -560,6 +507,12 @@ def main() -> None:
         raise ValueError("--min-power-threshold must be non-negative")
     if args.min_cadence_threshold < 0:
         raise ValueError("--min-cadence-threshold must be non-negative")
+    if args.residual_outlier_limit is not None and args.residual_outlier_limit <= 0:
+        raise ValueError("--residual-outlier-limit must be positive")
+    if args.estimate_elevation_lag and args.elevation_lag_bound <= 0:
+        raise ValueError(
+            "--elevation-lag-bound must be positive when estimating elevation lag"
+        )
 
     data = parse_cycling_fit(fit_path, smoothing_window=args.smoothing_window)
 
@@ -575,8 +528,9 @@ def main() -> None:
         estimate_parameters=args.estimate_parameters,
         estimate_efficiency=args.estimate_efficiency,
         estimate_crr=args.estimate_crr,
-        residual_std_multiplier=args.residual_std_multiplier,
-        elevation_lag_s=args.elevation_lag,
+        residual_outlier_limit=args.residual_outlier_limit,
+        estimate_elevation_lag=args.estimate_elevation_lag,
+        elevation_lag_bound=args.elevation_lag_bound,
         apply_min_power_weighting=args.min_power_weighting,
         min_power_threshold=args.min_power_threshold,
         apply_min_cadence_weighting=args.min_cadence_weighting,
