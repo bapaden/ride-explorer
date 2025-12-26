@@ -74,10 +74,53 @@ def _aligned_attribute(records: Sequence[RecordPoint], attribute: str) -> np.nda
     )
 
 
+def _time_shift_attribute(
+    records: Sequence[RecordPoint], attribute: str, shift: float
+) -> np.ndarray:
+    """Shift a record attribute in time using linear interpolation.
+
+    The helper treats the input ``records`` as samples of ``attribute`` taken at
+    their associated timestamps. The samples are shifted by ``shift`` seconds
+    (positive values move the attribute earlier in time) and interpolated back
+    onto the original record timeline. When no finite samples are available, the
+    returned array is filled with ``NaN``.
+    """
+
+    if not records:
+        return np.array([], dtype=float)
+
+    if shift == 0:
+        return _aligned_attribute(records, attribute)
+
+    timestamps = _timestamp_offsets(records)
+    values = _aligned_attribute(records, attribute)
+
+    finite_mask = np.isfinite(values)
+    if not np.any(finite_mask):
+        return values
+
+    shifted_times = timestamps + float(shift)
+    finite_times = shifted_times[finite_mask]
+    finite_values = values[finite_mask]
+    order = np.argsort(finite_times)
+    ordered_times = finite_times[order]
+    ordered_values = finite_values[order]
+
+    return np.interp(
+        timestamps,
+        ordered_times,
+        ordered_values,
+        left=ordered_values[0],
+        right=ordered_values[-1],
+    )
+
+
 def prepare_power_balance_data(
     records: Sequence[RecordPoint],
     system_mass_kg: float,
     air_density: float = AIR_DENSITY_KG_PER_M3,
+    *,
+    elevation_lag_s: float = 0.0,
 ) -> PowerBalanceData:
     """Convert raw FIT records into aligned power-balance inputs.
 
@@ -90,6 +133,10 @@ def prepare_power_balance_data(
     air_density:
         Air density in kg/m³ used for aerodynamic drag. Defaults to ISA sea
         level density (1.225).
+    elevation_lag_s:
+        Time shift (seconds) applied to the elevation stream to compensate for
+        delayed altitude readings. Positive values move elevation samples
+        earlier in time.
 
     Returns
     -------
@@ -117,14 +164,15 @@ def prepare_power_balance_data(
         raise ValueError("Speed and power streams are required for coefficient fitting")
 
     time_origin = first_timestamp.timestamp()
-    climb_series = compute_climbing_rate(records, time_origin=time_origin)
-    acceleration_series = compute_acceleration(records, time_origin=time_origin)
-
+    climb_series = compute_climbing_rate(
+        records, time_origin=time_origin, elevation_lag_s=elevation_lag_s
+    )
     climb_rates = climb_series.values
-    acceleration_rates = acceleration_series.values
-
     if climb_rates.size == 0:
         climb_rates = np.zeros_like(speed_values)
+
+    acceleration_series = compute_acceleration(records, time_origin=time_origin)
+    acceleration_rates = acceleration_series.values
     if acceleration_rates.size == 0:
         acceleration_rates = np.zeros_like(speed_values)
 
@@ -248,6 +296,7 @@ def estimate_coefficients_from_records(
     weights: np.ndarray | None = None,
     include_drivetrain_efficiency: bool = True,
     fixed_efficiency: float = 1.0,
+    elevation_lag_s: float = 0.0,
 ) -> tuple[float, float, float]:
     """Driver helper to fit coefficients directly from FIT records.
 
@@ -257,6 +306,8 @@ def estimate_coefficients_from_records(
     Set ``cadence_weight_threshold`` to ``None`` to disable cadence-based
     weighting. Setting ``use_record_air_density`` to ``True`` automatically
     estimates air density from temperature and altitude streams when available.
+    ``elevation_lag_s`` shifts the altitude stream before computing climbing
+    rate to compensate for delayed elevation sensors.
     """
 
     if use_record_air_density:
@@ -268,6 +319,7 @@ def estimate_coefficients_from_records(
         records=records,
         system_mass_kg=system_mass_kg,
         air_density=air_density,
+        elevation_lag_s=elevation_lag_s,
     )
 
     base_weights = np.ones(data.sample_count, dtype=float)

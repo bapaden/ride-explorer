@@ -349,6 +349,7 @@ def _plot_activity(
     estimate_parameters: bool,
     estimate_efficiency: bool,
     residual_std_multiplier: float,
+    elevation_lag_s: float,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -373,7 +374,9 @@ def _plot_activity(
         f"Derived Power (system mass: {system_mass_kg} kg): {data.source.name}",
         fontsize=14,
     )
-    power_series = compute_mechanical_power(data.records, system_mass_kg)
+    power_series = compute_mechanical_power(
+        data.records, system_mass_kg, elevation_lag_s=elevation_lag_s
+    )
     _plot_power_components(power_ax, power_series)
     power_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("power", power_fig))
@@ -389,7 +392,9 @@ def _plot_activity(
     estimation_stats: dict[str, float] | None = None
     try:
         power_balance_data = prepare_power_balance_data(
-            data.records, system_mass_kg=system_mass_kg
+            data.records,
+            system_mass_kg=system_mass_kg,
+            elevation_lag_s=elevation_lag_s,
         )
     except ValueError as exc:
         power_balance_error = str(exc)
@@ -591,6 +596,15 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--elevation-lag",
+        type=float,
+        default=0.0,
+        help=(
+            "Lag to apply to elevation data (seconds). Positive values shift "
+            "elevation earlier to compensate delayed sensors."
+        ),
+    )
+    parser.add_argument(
         "--estimate_parameters",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -641,6 +655,7 @@ def main() -> None:
         estimate_parameters=args.estimate_parameters,
         estimate_efficiency=args.estimate_efficiency,
         residual_std_multiplier=args.residual_std_multiplier,
+        elevation_lag_s=args.elevation_lag,
     )
 
 
