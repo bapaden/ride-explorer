@@ -55,12 +55,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--residual_std_multiplier",
+        "--residual-outlier-limit",
         type=float,
-        default=2.0,
+        default=200.0,
         help=(
-            "Multiplier applied to residual standard deviation for zero-weighting "
-            "outlier samples (default: 2.0)."
+            "Absolute residual magnitude (W) above which samples are zero-weighted "
+            "during coefficient estimation."
         ),
     )
     parser.add_argument(
@@ -88,15 +88,6 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "Window size for moving-average smoothing applied to interpolated "
             "record streams. A value of 1 disables smoothing."
-        ),
-    )
-    parser.add_argument(
-        "--elevation-lag",
-        type=float,
-        default=0.0,
-        help=(
-            "Lag to apply to elevation data (seconds). Positive values shift "
-            "elevation earlier to compensate delayed sensors."
         ),
     )
     parser.add_argument(
@@ -163,6 +154,24 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "minimum cadence weighting is enabled."
         ),
     )
+    parser.add_argument(
+        "--estimate-elevation-lag",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable elevation lag estimation using a golden-section search between "
+            "zero and the provided bound."
+        ),
+    )
+    parser.add_argument(
+        "--elevation-lag-bound",
+        type=float,
+        default=3.0,
+        help=(
+            "Search bound in seconds for the elevation lag golden-section search "
+            "(negative values search for lag < 0); estimation searches between "
+            "zero and this bound."
+        ),
+    )
 
     return parser
-
