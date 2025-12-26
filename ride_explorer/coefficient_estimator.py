@@ -315,6 +315,7 @@ def estimate_coefficients_from_records(
     air_density: float = AIR_DENSITY_KG_PER_M3,
     use_record_air_density: bool = False,
     cadence_weight_threshold: int | None = 30,
+    power_weight_threshold: float | None = 50.0,
     weights: np.ndarray | None = None,
     include_drivetrain_efficiency: bool = True,
     include_rolling_resistance: bool = True,
@@ -324,11 +325,12 @@ def estimate_coefficients_from_records(
 ) -> tuple[float, float, float]:
     """Driver helper to fit coefficients directly from FIT records.
 
-    Cadence-weighting support is built in: when cadence is available, samples
-    with cadence below ``cadence_weight_threshold`` receive zero weight. Caller
-    weights (``weights``) are applied multiplicatively after cadence gating.
-    Set ``cadence_weight_threshold`` to ``None`` to disable cadence-based
-    weighting. Setting ``use_record_air_density`` to ``True`` automatically
+    Cadence- and power-based weighting support is built in: when cadence is
+    available, samples with cadence below ``cadence_weight_threshold`` receive
+    zero weight; samples with crank power below ``power_weight_threshold`` are
+    similarly zeroed. Caller weights (``weights``) are applied multiplicatively
+    after gating. Set the thresholds to ``None`` to disable each weighting
+    strategy. Setting ``use_record_air_density`` to ``True`` automatically
     estimates air density from temperature and altitude streams when available.
     ``elevation_lag_s`` shifts the altitude stream before computing climbing
     rate to compensate for delayed elevation sensors.
@@ -347,6 +349,9 @@ def estimate_coefficients_from_records(
     )
 
     base_weights = np.ones(data.sample_count, dtype=float)
+    if power_weight_threshold is not None:
+        power_mask = data.crank_power >= power_weight_threshold
+        base_weights = base_weights * power_mask.astype(float)
     if data.cadence is not None and cadence_weight_threshold is not None:
         cadence_mask = data.cadence >= cadence_weight_threshold
         base_weights = base_weights * cadence_mask.astype(float)
