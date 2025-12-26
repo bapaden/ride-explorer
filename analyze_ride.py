@@ -333,7 +333,8 @@ def _plot_activity(
     estimate_parameters: bool,
     estimate_efficiency: bool,
     estimate_crr: bool,
-    residual_outlier_limit: float | None,
+    residual_outlier_min: float | None,
+    residual_outlier_max: float | None,
     estimate_elevation_lag: bool,
     elevation_lag_bound: float,
     apply_min_power_weighting: bool,
@@ -377,7 +378,8 @@ def _plot_activity(
             include_rolling_resistance=estimate_crr,
             fixed_efficiency=eta,
             fixed_crr=crr,
-            residual_outlier_limit=residual_outlier_limit,
+            residual_outlier_min=residual_outlier_min,
+            residual_outlier_max=residual_outlier_max,
             power_weight_threshold=min_power_threshold
             if apply_min_power_weighting
             else None,
@@ -507,8 +509,12 @@ def main() -> None:
         raise ValueError("--min-power-threshold must be non-negative")
     if args.min_cadence_threshold < 0:
         raise ValueError("--min-cadence-threshold must be non-negative")
-    if args.residual_outlier_limit is not None and args.residual_outlier_limit <= 0:
-        raise ValueError("--residual-outlier-limit must be positive")
+    if (
+        args.residual_outlier_min is not None
+        and args.residual_outlier_max is not None
+        and args.residual_outlier_min >= args.residual_outlier_max
+    ):
+        raise ValueError("--residual-outlier-min must be less than --residual-outlier-max")
     if args.estimate_elevation_lag and args.elevation_lag_bound == 0:
         raise ValueError(
             "--elevation-lag-bound must be nonzero when estimating elevation lag"
@@ -528,7 +534,8 @@ def main() -> None:
         estimate_parameters=args.estimate_parameters,
         estimate_efficiency=args.estimate_efficiency,
         estimate_crr=args.estimate_crr,
-        residual_outlier_limit=args.residual_outlier_limit,
+        residual_outlier_min=args.residual_outlier_min,
+        residual_outlier_max=args.residual_outlier_max,
         estimate_elevation_lag=args.estimate_elevation_lag,
         elevation_lag_bound=args.elevation_lag_bound,
         apply_min_power_weighting=args.min_power_weighting,

@@ -348,7 +348,8 @@ def estimate_coefficients_from_records(
     fixed_efficiency: float = 1.0,
     fixed_crr: float = 0.004,
     initial_cda: float = 0.32,
-    residual_outlier_limit: float | None = None,
+    residual_outlier_min: float | None = None,
+    residual_outlier_max: float | None = None,
     elevation_lag_s: float = 0.0,
     estimate_elevation_lag: bool = False,
     elevation_lag_bound: float = 0.0,
@@ -381,7 +382,8 @@ def estimate_coefficients_from_records(
         fixed_efficiency=fixed_efficiency,
         fixed_crr=fixed_crr,
         initial_cda=initial_cda,
-        residual_outlier_limit=residual_outlier_limit,
+        residual_outlier_min=residual_outlier_min,
+        residual_outlier_max=residual_outlier_max,
         elevation_lag_s=elevation_lag_s,
         estimate_elevation_lag=estimate_elevation_lag,
         elevation_lag_bound=elevation_lag_bound,
@@ -409,7 +411,8 @@ def _estimation_for_lag(
     fixed_efficiency: float,
     fixed_crr: float,
     initial_cda: float,
-    residual_outlier_limit: float | None,
+    residual_outlier_min: float | None,
+    residual_outlier_max: float | None,
     elevation_lag_s: float,
 ) -> PowerBalanceEstimation:
     data = prepare_power_balance_data(
@@ -430,11 +433,17 @@ def _estimation_for_lag(
             raise ValueError("weights must match the number of samples in data")
         base_weights *= weights
 
-    if residual_outlier_limit is not None and residual_outlier_limit > 0:
+    if (
+        residual_outlier_min is not None
+        or residual_outlier_max is not None
+    ):
         initial_residuals = _power_balance_residual(
             data, eta=fixed_efficiency, crr=fixed_crr, cda=initial_cda
         )
-        base_weights[np.abs(initial_residuals) > residual_outlier_limit] = 0
+        if residual_outlier_min is not None:
+            base_weights[initial_residuals < residual_outlier_min] = 0
+        if residual_outlier_max is not None:
+            base_weights[initial_residuals > residual_outlier_max] = 0
 
     eta, crr, cda = fit_power_balance_parameters(
         data=data,
@@ -480,7 +489,8 @@ def estimate_power_balance(
     fixed_efficiency: float = 1.0,
     fixed_crr: float = 0.004,
     initial_cda: float = 0.32,
-    residual_outlier_limit: float | None = None,
+    residual_outlier_min: float | None = None,
+    residual_outlier_max: float | None = None,
     elevation_lag_s: float = 0.0,
     estimate_elevation_lag: bool = False,
     elevation_lag_bound: float = 0.0,
@@ -491,8 +501,15 @@ def estimate_power_balance(
     a golden-section search between zero and ``elevation_lag_bound`` (negative
     bounds allowed) to select the lag that minimizes the weighted RMS residual.
     Residual outlier gating uses an absolute wattage limit instead of
-    standard-deviation scaling.
+    standard-deviation scaling and supports asymmetric lower/upper bounds.
     """
+
+    if (
+        residual_outlier_min is not None
+        and residual_outlier_max is not None
+        and residual_outlier_min >= residual_outlier_max
+    ):
+        raise ValueError("residual_outlier_min must be less than residual_outlier_max")
 
     if use_record_air_density:
         air_density = estimate_air_density_from_records(
@@ -511,7 +528,8 @@ def estimate_power_balance(
         fixed_efficiency=fixed_efficiency,
         fixed_crr=fixed_crr,
         initial_cda=initial_cda,
-        residual_outlier_limit=residual_outlier_limit,
+        residual_outlier_min=residual_outlier_min,
+        residual_outlier_max=residual_outlier_max,
         elevation_lag_s=elevation_lag_s,
     )
 
@@ -548,7 +566,8 @@ def estimate_power_balance(
             fixed_efficiency=fixed_efficiency,
             fixed_crr=fixed_crr,
             initial_cda=initial_cda,
-            residual_outlier_limit=residual_outlier_limit,
+            residual_outlier_min=residual_outlier_min,
+            residual_outlier_max=residual_outlier_max,
             elevation_lag_s=lag,
         )
         if result.stats["weighted_rms"] < best_result.stats["weighted_rms"]:
