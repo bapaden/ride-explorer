@@ -348,6 +348,7 @@ def _plot_activity(
     cda: float,
     estimate_parameters: bool,
     estimate_efficiency: bool,
+    estimate_crr: bool,
     residual_std_multiplier: float,
     elevation_lag_s: float,
 ) -> None:
@@ -421,7 +422,9 @@ def _plot_activity(
                     data=power_balance_data,
                     weights=estimation_weights,
                     include_drivetrain_efficiency=estimate_efficiency,
+                    include_rolling_resistance=estimate_crr,
                     fixed_efficiency=eta,
+                    fixed_crr=crr,
                 )
                 plot_eta, plot_crr, plot_cda = estimated_params
                 print(
@@ -623,6 +626,15 @@ def main() -> None:
             "eta is fixed to the provided value and only Crr/CdA are estimated."
         ),
     )
+    parser.add_argument(
+        "--estimate_crr",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Whether to estimate rolling resistance (Crr). When false, "
+            "Crr is fixed to the provided value and only eta/CdA are estimated."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -654,6 +666,7 @@ def main() -> None:
         cda=args.cda,
         estimate_parameters=args.estimate_parameters,
         estimate_efficiency=args.estimate_efficiency,
+        estimate_crr=args.estimate_crr,
         residual_std_multiplier=args.residual_std_multiplier,
         elevation_lag_s=args.elevation_lag,
     )
