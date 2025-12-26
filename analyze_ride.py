@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
@@ -11,6 +10,7 @@ import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 
+from ride_explorer.arguments import build_argument_parser
 from ride_explorer.coefficient_estimator import (
     PowerBalanceData,
     fit_power_balance_parameters,
@@ -351,6 +351,10 @@ def _plot_activity(
     estimate_crr: bool,
     residual_std_multiplier: float,
     elevation_lag_s: float,
+    apply_min_power_weighting: bool,
+    min_power_threshold: float,
+    apply_min_cadence_weighting: bool,
+    min_cadence_threshold: float,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -402,9 +406,10 @@ def _plot_activity(
 
     if power_balance_data is not None and power_balance_error is None:
         estimation_weights = np.ones(power_balance_data.sample_count, dtype=float)
-        estimation_weights[power_balance_data.crank_power < 50] = 0
-        if power_balance_data.cadence is not None:
-            estimation_weights[power_balance_data.cadence < 25] = 0
+        if apply_min_power_weighting:
+            estimation_weights[power_balance_data.crank_power < min_power_threshold] = 0
+        if apply_min_cadence_weighting and power_balance_data.cadence is not None:
+            estimation_weights[power_balance_data.cadence < min_cadence_threshold] = 0
 
         initial_residuals = _power_balance_residual(
             power_balance_data, eta, crr, cda
@@ -534,108 +539,7 @@ def _plot_activity(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Visualize GPS route and ride metrics from a Garmin FIT file.",
-    )
-    parser.add_argument(
-        "--fit_file",
-        type=Path,
-        required=True,
-        help="Path to the .fit file to analyze",
-    )
-    parser.add_argument(
-        "--output",
-        type=Path,
-        help="Optional path to save the generated figure instead of displaying it.",
-    )
-    parser.add_argument(
-        "--no-show",
-        action="store_true",
-        help="Do not open the matplotlib window (useful for headless environments).",
-    )
-    parser.add_argument(
-        "--system_mass",
-        type=float,
-        required=True,
-        help=(
-            "Total system mass in kilograms (rider + bike) used for derived power "
-            "calculations."
-        ),
-    )
-    parser.add_argument(
-        "--residual_std_multiplier",
-        type=float,
-        default=2.0,
-        help=(
-            "Multiplier applied to residual standard deviation for zero-weighting "
-            "outlier samples (default: 2.0)."
-        ),
-    )
-    parser.add_argument(
-        "--cda",
-        type=float,
-        default=0.32,
-        help="Aerodynamic drag area (m^2) used for power balance calculations.",
-    )
-    parser.add_argument(
-        "--crr",
-        type=float,
-        default=0.004,
-        help="Rolling resistance coefficient (unitless) for power balance calculations.",
-    )
-    parser.add_argument(
-        "--eta",
-        type=float,
-        default=0.97,
-        help="Drivetrain efficiency (0–1) used for power balance calculations.",
-    )
-    parser.add_argument(
-        "--smoothing_window",
-        type=int,
-        default=1,
-        help=(
-            "Window size for moving-average smoothing applied to interpolated "
-            "record streams. A value of 1 disables smoothing."
-        ),
-    )
-    parser.add_argument(
-        "--elevation-lag",
-        type=float,
-        default=0.0,
-        help=(
-            "Lag to apply to elevation data (seconds). Positive values shift "
-            "elevation earlier to compensate delayed sensors."
-        ),
-    )
-    parser.add_argument(
-        "--estimate_parameters",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help=(
-            "Whether to run parameter estimation. When true, supplied "
-            "eta/Crr/CdA values are used for weighting gates and plots; "
-            "when false, supplied values are used without optimization."
-        ),
-    )
-    parser.add_argument(
-        "--estimate_efficiency",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Whether to estimate drivetrain efficiency (eta). When false, "
-            "eta is fixed to the provided value and only Crr/CdA are estimated."
-        ),
-    )
-    parser.add_argument(
-        "--estimate_crr",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help=(
-            "Whether to estimate rolling resistance (Crr). When false, "
-            "Crr is fixed to the provided value and only eta/CdA are estimated."
-        ),
-    )
-
+    parser = build_argument_parser()
     args = parser.parse_args()
 
     fit_path = args.fit_file
@@ -652,6 +556,10 @@ def main() -> None:
         raise ValueError("--eta must be in the range (0, 1]")
     if args.smoothing_window <= 0:
         raise ValueError("--smoothing_window must be a positive integer")
+    if args.min_power_threshold < 0:
+        raise ValueError("--min-power-threshold must be non-negative")
+    if args.min_cadence_threshold < 0:
+        raise ValueError("--min-cadence-threshold must be non-negative")
 
     data = parse_cycling_fit(fit_path, smoothing_window=args.smoothing_window)
 
@@ -669,6 +577,10 @@ def main() -> None:
         estimate_crr=args.estimate_crr,
         residual_std_multiplier=args.residual_std_multiplier,
         elevation_lag_s=args.elevation_lag,
+        apply_min_power_weighting=args.min_power_weighting,
+        min_power_threshold=args.min_power_threshold,
+        apply_min_cadence_weighting=args.min_cadence_weighting,
+        min_cadence_threshold=args.min_cadence_threshold,
     )
 
 
