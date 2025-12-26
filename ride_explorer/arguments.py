@@ -168,8 +168,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=3.0,
         help=(
-            "Upper bound in seconds for the elevation lag golden-section search "
-            "when lag estimation is enabled."
+            "Search bound in seconds for the elevation lag golden-section search "
+            "(negative values search for lag < 0); estimation searches between "
+            "zero and this bound."
         ),
     )
 

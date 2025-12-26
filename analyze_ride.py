@@ -509,9 +509,9 @@ def main() -> None:
         raise ValueError("--min-cadence-threshold must be non-negative")
     if args.residual_outlier_limit is not None and args.residual_outlier_limit <= 0:
         raise ValueError("--residual-outlier-limit must be positive")
-    if args.estimate_elevation_lag and args.elevation_lag_bound <= 0:
+    if args.estimate_elevation_lag and args.elevation_lag_bound == 0:
         raise ValueError(
-            "--elevation-lag-bound must be positive when estimating elevation lag"
+            "--elevation-lag-bound must be nonzero when estimating elevation lag"
         )
 
     data = parse_cycling_fit(fit_path, smoothing_window=args.smoothing_window)

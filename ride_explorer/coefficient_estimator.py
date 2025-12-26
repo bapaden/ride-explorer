@@ -488,9 +488,10 @@ def estimate_power_balance(
     """Estimate coefficients and residuals with optional elevation lag search.
 
     The helper performs coefficient estimation for a fixed elevation lag or runs
-    a golden-section search between zero and ``elevation_lag_bound`` to select
-    the lag that minimizes the weighted RMS residual. Residual outlier gating
-    uses an absolute wattage limit instead of standard-deviation scaling.
+    a golden-section search between zero and ``elevation_lag_bound`` (negative
+    bounds allowed) to select the lag that minimizes the weighted RMS residual.
+    Residual outlier gating uses an absolute wattage limit instead of
+    standard-deviation scaling.
     """
 
     if use_record_air_density:
@@ -511,20 +512,23 @@ def estimate_power_balance(
         fixed_crr=fixed_crr,
         initial_cda=initial_cda,
         residual_outlier_limit=residual_outlier_limit,
-        elevation_lag_s=0.0,
+        elevation_lag_s=elevation_lag_s,
     )
 
-    if not estimate_elevation_lag or elevation_lag_bound <= 0:
+    if not estimate_elevation_lag or elevation_lag_bound == 0:
+        return best_result
+
+    lower = min(0.0, float(elevation_lag_bound))
+    upper = max(0.0, float(elevation_lag_bound))
+    h = upper - lower
+
+    if h <= 0:
         return best_result
 
     golden_ratio = (1 + np.sqrt(5)) / 2
     inv_phi = 1 / golden_ratio
     inv_phi2 = inv_phi * inv_phi
-    a, b = 0.0, float(elevation_lag_bound)
-    h = b - a
-
-    if h <= 0:
-        return best_result
+    a, b = lower, upper
 
     n = int(np.ceil(np.log((1e-2) / h) / np.log(inv_phi)))
     c = a + inv_phi2 * h
