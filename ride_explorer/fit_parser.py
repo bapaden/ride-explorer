@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -44,6 +44,7 @@ class RecordPoint:
     cadence: Optional[int]
     temperature: Optional[float]
     power: Optional[int]
+    lap: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -142,6 +143,7 @@ def _parse_records(fit: FitFile) -> List[RecordPoint]:
                 cadence=_safe_get(fields, "cadence"),
                 temperature=_safe_get(fields, "temperature"),
                 power=_safe_get(fields, "power"),
+                lap=None,
             )
         )
     return records
@@ -340,6 +342,12 @@ def _align_and_smooth_records(
     )
     latitudes, longitudes = _interpolate_positions(records, target_seconds)
 
+    lap_by_time = {
+        record.timestamp.timestamp(): record.lap
+        for record in records
+        if record.timestamp is not None
+    }
+
     aligned: list[RecordPoint] = []
     for idx, timestamp in enumerate(time_grid):
         lat = latitudes[idx]
@@ -347,6 +355,7 @@ def _align_and_smooth_records(
         position = (
             (lat, lon) if not np.isnan(lat) and not np.isnan(lon) else None
         )
+        lap = lap_by_time.get(timestamp.timestamp())
 
         aligned.append(
             RecordPoint(
@@ -359,10 +368,58 @@ def _align_and_smooth_records(
                 cadence=_cast_value(cadence[idx], to_int=True),
                 temperature=_cast_value(temperature[idx]),
                 power=_cast_value(power[idx], to_int=True),
+                lap=lap,
             )
         )
 
     return aligned
+
+
+def _lap_intervals(laps: Sequence[Lap]) -> list[tuple[datetime, datetime, int]]:
+    intervals: list[tuple[datetime, datetime, int]] = []
+
+    laps_with_start = [
+        (idx, lap.start_time, lap.total_timer_time)
+        for idx, lap in enumerate(laps)
+        if lap.start_time is not None
+    ]
+
+    laps_with_start.sort(key=lambda item: item[1])
+
+    for current, (idx, start_time, duration) in enumerate(laps_with_start):
+        if duration is not None:
+            end_time = start_time + timedelta(seconds=duration)
+        elif current + 1 < len(laps_with_start):
+            end_time = laps_with_start[current + 1][1]
+        else:
+            end_time = datetime.max
+
+        intervals.append((start_time, end_time, idx))
+
+    return intervals
+
+
+def _annotate_record_laps(
+    records: Sequence[RecordPoint], laps: Sequence[Lap]
+) -> list[RecordPoint]:
+    if not records or not laps:
+        return list(records)
+
+    intervals = _lap_intervals(laps)
+
+    annotated: list[RecordPoint] = []
+    for record in records:
+        lap_idx: Optional[int] = None
+        ts = record.timestamp
+        if ts is not None:
+            for start_time, end_time, idx in intervals:
+                if start_time <= ts < end_time:
+                    lap_idx = idx
+                    break
+
+        annotated.append(replace(record, lap=lap_idx))
+
+    return annotated
 
 
 def _parse_laps(fit: FitFile) -> List[Lap]:
@@ -438,6 +495,7 @@ def parse_cycling_fit(
     records = _parse_records(fit_file)
     laps = _parse_laps(fit_file)
     sessions = _parse_sessions(fit_file)
+    records = _annotate_record_laps(records, laps)
 
     return CyclingFitData(
         source=Path(path),
