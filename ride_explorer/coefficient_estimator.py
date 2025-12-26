@@ -175,7 +175,8 @@ def _weighted_least_squares(
     sqrt_w = np.sqrt(weights)
     design_w = design * sqrt_w[:, None]
     target_w = target * sqrt_w
-    solution, _, _, _ = np.linalg.lstsq(design_w, target_w, rcond=None)
+    solution, residuals, rank, s = np.linalg.lstsq(design_w, target_w, rcond=None)
+    print("Singular Values: ", s)
     return solution
 
 
