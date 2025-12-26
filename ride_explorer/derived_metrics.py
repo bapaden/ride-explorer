@@ -65,8 +65,28 @@ def _extract_numeric_series(
     return DerivedSeries(times=times - start, values=values)
 
 
+def _time_shift_series(series: DerivedSeries, shift: float) -> DerivedSeries:
+    """Shift a numeric series in time while preserving its sampling grid."""
+
+    if shift == 0 or series.times.size == 0:
+        return series
+
+    shifted_times = series.times + float(shift)
+    values = np.interp(
+        series.times,
+        shifted_times,
+        series.values,
+        left=series.values[0],
+        right=series.values[-1],
+    )
+    return DerivedSeries(times=series.times, values=values)
+
+
 def compute_climbing_rate(
-    records: Sequence[RecordPoint], *, time_origin: float | None = None
+    records: Sequence[RecordPoint],
+    *,
+    time_origin: float | None = None,
+    elevation_lag_s: float = 0.0,
 ) -> DerivedSeries:
     """Compute climbing rate (vertical speed) in m/s using finite differences.
 
@@ -92,6 +112,10 @@ def compute_climbing_rate(
         Optional absolute timestamp (seconds since epoch) used as the zero
         reference for the returned ``times`` array. When omitted, the first valid
         timestamp in the altitude series is used.
+    elevation_lag_s:
+        Time shift (seconds) applied to the altitude stream to compensate for
+        delays in elevation readings. Positive values move elevation samples
+        earlier in time before differencing.
 
     Returns
     -------
@@ -102,6 +126,8 @@ def compute_climbing_rate(
     """
 
     series = _extract_numeric_series(records, "altitude", time_origin=time_origin)
+    if elevation_lag_s != 0:
+        series = _time_shift_series(series, elevation_lag_s)
     if series.times.size < 2:
         # Derivatives require at least two samples; return empty arrays otherwise.
         return DerivedSeries(times=np.array([]), values=np.array([]))
@@ -140,7 +166,10 @@ def compute_acceleration(
 
 
 def compute_all_derived_metrics(
-    records: Sequence[RecordPoint], *, time_origin: float | None = None
+    records: Sequence[RecordPoint],
+    *,
+    time_origin: float | None = None,
+    elevation_lag_s: float = 0.0,
 ) -> dict[str, DerivedSeries]:
     """Compute all available derived metrics for a given record stream.
 
@@ -155,10 +184,14 @@ def compute_all_derived_metrics(
         Optional absolute timestamp (seconds since epoch) used as the zero
         reference for the returned ``times`` arrays. When omitted, each series
         uses its own first valid timestamp.
+    elevation_lag_s:
+        Optional elevation lag (seconds) applied before computing climbing rate.
     """
 
     return {
-        "climbing_rate": compute_climbing_rate(records, time_origin=time_origin),
+        "climbing_rate": compute_climbing_rate(
+            records, time_origin=time_origin, elevation_lag_s=elevation_lag_s
+        ),
         "acceleration": compute_acceleration(records, time_origin=time_origin),
     }
 
@@ -168,6 +201,7 @@ def compute_mechanical_power(
     system_mass_kg: float,
     *,
     time_origin: float | None = None,
+    elevation_lag_s: float = 0.0,
 ) -> dict[str, DerivedSeries]:
     """Estimate mechanical power components for acceleration and climbing.
 
@@ -191,6 +225,9 @@ def compute_mechanical_power(
         Optional absolute timestamp (seconds since epoch) used as the zero
         reference for the returned ``times`` arrays. When omitted, the first
         valid timestamp in each series is used.
+    elevation_lag_s:
+        Time shift (seconds) applied to the elevation stream before computing
+        climbing rate, useful for compensating delayed barometric sensors.
 
     Returns
     -------
@@ -213,7 +250,9 @@ def compute_mechanical_power(
     # Acceleration uses the speed stream; the speed samples define the time grid
     # for the final power calculation.
     accel_series = compute_acceleration(records, time_origin=time_origin)
-    climb_series = compute_climbing_rate(records, time_origin=time_origin)
+    climb_series = compute_climbing_rate(
+        records, time_origin=time_origin, elevation_lag_s=elevation_lag_s
+    )
 
     if accel_series.times.size == 0 or climb_series.times.size == 0:
         empty = DerivedSeries(times=np.array([]), values=np.array([]))
