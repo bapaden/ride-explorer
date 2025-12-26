@@ -233,7 +233,9 @@ def fit_power_balance_parameters(
     weights: np.ndarray | None = None,
     *,
     include_drivetrain_efficiency: bool = True,
+    include_rolling_resistance: bool = True,
     fixed_efficiency: float = 0.98,
+    fixed_crr: float = 0.004,
 ) -> tuple[float, float, float]:
     """Estimate drivetrain efficiency, rolling resistance, and CdA.
 
@@ -247,9 +249,15 @@ def fit_power_balance_parameters(
     include_drivetrain_efficiency:
         Whether to fit drivetrain efficiency (``eta``). If ``False``,
         ``fixed_efficiency`` is used instead.
+    include_rolling_resistance:
+        Whether to fit rolling resistance (``Crr``). If ``False``,
+        ``fixed_crr`` is used instead.
     fixed_efficiency:
         Drivetrain efficiency to hold constant when ``include_drivetrain_efficiency``
         is ``False``.
+    fixed_crr:
+        Rolling resistance coefficient to hold constant when
+        ``include_rolling_resistance`` is ``False``.
 
     Returns
     -------
@@ -266,24 +274,38 @@ def fit_power_balance_parameters(
             raise ValueError("weights must match the number of samples in data")
         base_weights = np.asarray(weights, dtype=float)
 
+    design_terms = []
+    target = -(data.gravity_power + data.acceleration_power)
+
     if include_drivetrain_efficiency:
-        design = np.column_stack(
-            [data.crank_power, data.rolling_term, data.aero_term]
-        )
-        target = -(data.gravity_power + data.acceleration_power)
+        design_terms.append(data.crank_power)
     else:
-        design = np.column_stack([data.rolling_term, data.aero_term])
-        target = -(fixed_efficiency * data.crank_power + data.gravity_power + data.acceleration_power)
+        target -= fixed_efficiency * data.crank_power
+
+    if include_rolling_resistance:
+        design_terms.append(data.rolling_term)
+    else:
+        target -= fixed_crr * data.rolling_term
+
+    design_terms.append(data.aero_term)
+    design = np.column_stack(design_terms)
 
     params = _weighted_least_squares(design=design, target=target, weights=base_weights)
 
-    if include_drivetrain_efficiency:
-        eta, crr, cda = params.tolist()
-    else:
-        eta = fixed_efficiency
-        crr, cda = params.tolist()
+    eta = fixed_efficiency
+    crr = fixed_crr
+    param_index = 0
 
-    return float(eta), float(crr), float(cda)
+    if include_drivetrain_efficiency:
+        eta = float(params[param_index])
+        param_index += 1
+    if include_rolling_resistance:
+        crr = float(params[param_index])
+        param_index += 1
+
+    cda = float(params[param_index])
+
+    return eta, crr, cda
 
 
 def estimate_coefficients_from_records(
@@ -295,7 +317,9 @@ def estimate_coefficients_from_records(
     cadence_weight_threshold: int | None = 30,
     weights: np.ndarray | None = None,
     include_drivetrain_efficiency: bool = True,
+    include_rolling_resistance: bool = True,
     fixed_efficiency: float = 1.0,
+    fixed_crr: float = 0.004,
     elevation_lag_s: float = 0.0,
 ) -> tuple[float, float, float]:
     """Driver helper to fit coefficients directly from FIT records.
@@ -336,5 +360,7 @@ def estimate_coefficients_from_records(
         data=data,
         weights=base_weights,
         include_drivetrain_efficiency=include_drivetrain_efficiency,
+        include_rolling_resistance=include_rolling_resistance,
         fixed_efficiency=fixed_efficiency,
+        fixed_crr=fixed_crr,
     )
