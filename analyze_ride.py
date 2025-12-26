@@ -100,7 +100,7 @@ def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
     metrics = [
         ("Power (W)", "power", None),
         ("Cadence (rpm)", "cadence", None),
-        ("Speed (km/h)", "speed", lambda value: value * 3.6),
+        ("Speed (m/s)", "speed", lambda value: value),
         ("Heart rate (bpm)", "heart_rate", None),
         ("Altitude (m)", "altitude", None),
         ("Temperature (°C)", "temperature", None),
