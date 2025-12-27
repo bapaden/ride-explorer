@@ -83,8 +83,8 @@ def _shade_odd_laps(ax, intervals: Sequence[tuple[float, float, int]]) -> bool:
             ax.axvspan(
                 start,
                 end,
-                color="0.85",
-                alpha=0.4,
+                color="0.75",
+                alpha=0.45,
                 label="Odd lap" if not label_added else None,
             )
             label_added = True
