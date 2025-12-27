@@ -435,6 +435,7 @@ def _plot_activity(
     min_power_threshold: float,
     apply_min_cadence_weighting: bool,
     min_cadence_threshold: float,
+    apply_even_lap_weighting: bool,
 ) -> None:
     plt.style.use("ggplot")
 
@@ -491,6 +492,7 @@ def _plot_activity(
             cadence_weight_threshold=min_cadence_threshold
             if apply_min_cadence_weighting
             else None,
+            even_lap_weighting=apply_even_lap_weighting,
             estimate_elevation_lag=estimate_elevation_lag,
             elevation_lag_bound=elevation_lag_bound,
         )
@@ -649,6 +651,7 @@ def main() -> None:
         min_power_threshold=args.min_power_threshold,
         apply_min_cadence_weighting=args.min_cadence_weighting,
         min_cadence_threshold=args.min_cadence_threshold,
+        apply_even_lap_weighting=args.even_lap_weighting,
     )
 
 

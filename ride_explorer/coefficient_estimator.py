@@ -48,6 +48,7 @@ class PowerBalanceData:
     gravity_power: np.ndarray
     acceleration_power: np.ndarray
     cadence: np.ndarray | None
+    lap_index: np.ndarray | None
 
     @property
     def sample_count(self) -> int:
@@ -173,6 +174,7 @@ def prepare_power_balance_data(
     speed_values = _aligned_attribute(records, "speed")
     power_values = _aligned_attribute(records, "power")
     cadence_values = _aligned_attribute(records, "cadence")
+    lap_values = _aligned_attribute(records, "lap")
 
     if np.any(np.isnan(speed_values)) or np.any(np.isnan(power_values)):
         raise ValueError("Speed and power streams are required for coefficient fitting")
@@ -219,6 +221,7 @@ def prepare_power_balance_data(
     gravity = gravity_power[mask]
     acceleration_p = acceleration_power[mask]
     cadence = cadence_aligned[mask] if cadence_aligned is not None else None
+    lap_index = lap_values[mask] if np.any(np.isfinite(lap_values)) else None
 
     return PowerBalanceData(
         timestamps=timestamps,
@@ -228,6 +231,7 @@ def prepare_power_balance_data(
         gravity_power=gravity,
         acceleration_power=acceleration_p,
         cadence=cadence,
+        lap_index=lap_index,
     )
 
 
@@ -343,6 +347,7 @@ def estimate_coefficients_from_records(
     cadence_weight_threshold: int | None = 30,
     power_weight_threshold: float | None = 50.0,
     weights: np.ndarray | None = None,
+    even_lap_weighting: bool = False,
     include_drivetrain_efficiency: bool = True,
     include_rolling_resistance: bool = True,
     fixed_efficiency: float = 1.0,
@@ -361,7 +366,9 @@ def estimate_coefficients_from_records(
     zero weight; samples with crank power below ``power_weight_threshold`` are
     similarly zeroed. Caller weights (``weights``) are applied multiplicatively
     after gating. Set the thresholds to ``None`` to disable each weighting
-    strategy. Setting ``use_record_air_density`` to ``True`` automatically
+    strategy. Enabling ``even_lap_weighting`` zeroes samples from odd-numbered
+    laps (0-indexed) when lap annotations are present. Setting
+    ``use_record_air_density`` to ``True`` automatically
     estimates air density from temperature and altitude streams when available.
     ``elevation_lag_s`` shifts the altitude stream before computing climbing
     rate to compensate for delayed elevation sensors. When ``estimate_elevation_lag``
@@ -377,6 +384,7 @@ def estimate_coefficients_from_records(
         cadence_weight_threshold=cadence_weight_threshold,
         power_weight_threshold=power_weight_threshold,
         weights=weights,
+        even_lap_weighting=even_lap_weighting,
         include_drivetrain_efficiency=include_drivetrain_efficiency,
         include_rolling_resistance=include_rolling_resistance,
         fixed_efficiency=fixed_efficiency,
@@ -406,6 +414,7 @@ def _estimation_for_lag(
     cadence_weight_threshold: int | None,
     power_weight_threshold: float | None,
     weights: np.ndarray | None,
+    even_lap_weighting: bool,
     include_drivetrain_efficiency: bool,
     include_rolling_resistance: bool,
     fixed_efficiency: float,
@@ -427,6 +436,11 @@ def _estimation_for_lag(
         base_weights *= (data.crank_power >= power_weight_threshold).astype(float)
     if data.cadence is not None and cadence_weight_threshold is not None:
         base_weights *= (data.cadence >= cadence_weight_threshold).astype(float)
+
+    if even_lap_weighting and data.lap_index is not None:
+        lap_mask = np.isfinite(data.lap_index)
+        odd_lap_mask = lap_mask & (np.remainder(data.lap_index, 2) == 1)
+        base_weights[odd_lap_mask] = 0.0
 
     if weights is not None:
         if weights.shape != base_weights.shape:
@@ -484,6 +498,7 @@ def estimate_power_balance(
     cadence_weight_threshold: int | None = 30,
     power_weight_threshold: float | None = 50.0,
     weights: np.ndarray | None = None,
+    even_lap_weighting: bool = False,
     include_drivetrain_efficiency: bool = True,
     include_rolling_resistance: bool = True,
     fixed_efficiency: float = 1.0,
@@ -523,6 +538,7 @@ def estimate_power_balance(
         cadence_weight_threshold=cadence_weight_threshold,
         power_weight_threshold=power_weight_threshold,
         weights=weights,
+        even_lap_weighting=even_lap_weighting,
         include_drivetrain_efficiency=include_drivetrain_efficiency,
         include_rolling_resistance=include_rolling_resistance,
         fixed_efficiency=fixed_efficiency,
@@ -561,6 +577,7 @@ def estimate_power_balance(
             cadence_weight_threshold=cadence_weight_threshold,
             power_weight_threshold=power_weight_threshold,
             weights=weights,
+            even_lap_weighting=even_lap_weighting,
             include_drivetrain_efficiency=include_drivetrain_efficiency,
             include_rolling_resistance=include_rolling_resistance,
             fixed_efficiency=fixed_efficiency,

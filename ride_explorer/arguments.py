@@ -164,6 +164,15 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--even-lap-weighting",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Zero-weight samples from odd-numbered laps (0-indexed) when lap data is "
+            "available."
+        ),
+    )
+    parser.add_argument(
         "--estimate-elevation-lag",
         action=argparse.BooleanOptionalAction,
         default=False,
