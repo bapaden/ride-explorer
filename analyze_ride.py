@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
@@ -13,13 +14,89 @@ from matplotlib.colors import Normalize
 from ride_explorer.arguments import build_argument_parser
 from ride_explorer.coefficient_estimator import PowerBalanceData, estimate_power_balance
 from ride_explorer.derived_metrics import compute_mechanical_power
-from ride_explorer.fit_parser import CyclingFitData, RecordPoint, parse_cycling_fit
+from ride_explorer.fit_parser import CyclingFitData, Lap, RecordPoint, parse_cycling_fit
+
+
+def _first_timestamp(records: Sequence[RecordPoint]) -> datetime | None:
+    for record in records:
+        if record.timestamp is not None:
+            return record.timestamp
+    return None
+
+
+def _last_timestamp(records: Sequence[RecordPoint]) -> datetime | None:
+    for record in reversed(records):
+        if record.timestamp is not None:
+            return record.timestamp
+    return None
+
+
+def _lap_intervals_seconds(
+    laps: Sequence[Lap], *, start_time: datetime | None, end_time: datetime | None
+) -> list[tuple[float, float, int]]:
+    intervals: list[tuple[float, float, int]] = []
+
+    if not laps or start_time is None or end_time is None or end_time <= start_time:
+        return intervals
+
+    laps_with_start = [
+        (idx, lap.start_time, lap.total_timer_time)
+        for idx, lap in enumerate(laps)
+        if lap.start_time is not None
+    ]
+    if not laps_with_start:
+        return intervals
+
+    laps_with_start.sort(key=lambda item: item[1])
+
+    for current, (idx, lap_start, duration) in enumerate(laps_with_start):
+        if lap_start > end_time:
+            continue
+        if duration is not None:
+            lap_end = lap_start + timedelta(seconds=duration)
+        elif current + 1 < len(laps_with_start):
+            lap_end = laps_with_start[current + 1][1]
+        else:
+            lap_end = end_time
+
+        interval_start = max(lap_start, start_time)
+        interval_end = min(lap_end, end_time)
+        if interval_end <= interval_start:
+            continue
+
+        intervals.append(
+            (
+                (interval_start - start_time).total_seconds(),
+                (interval_end - start_time).total_seconds(),
+                idx,
+            )
+        )
+
+    return intervals
+
+
+def _shade_odd_laps(ax, intervals: Sequence[tuple[float, float, int]]) -> bool:
+    label_added = False
+    for start, end, lap_idx in intervals:
+        lap_number = lap_idx + 1
+        if lap_number % 2 == 1:
+            ax.axvspan(
+                start,
+                end,
+                color="0.75",
+                alpha=0.45,
+                label="Odd lap" if not label_added else None,
+            )
+            label_added = True
+    return label_added
 
 
 def _time_series(
     records: Sequence[RecordPoint],
     attribute: str,
     transform: Callable[[float], float] | None = None,
+    *,
+    reference_time: float | None = None,
 ) -> Tuple[List[float], List[float]]:
     """Return time offsets (seconds) and values for a numeric record attribute.
 
@@ -30,7 +107,7 @@ def _time_series(
     timestamps: List[float] = []
     values: List[float] = []
 
-    first_timestamp: Optional[float] = None
+    first_timestamp: Optional[float] = reference_time
     for record in records:
         ts = record.timestamp
         value = getattr(record, attribute)
@@ -92,7 +169,13 @@ def _plot_route(ax, positions: Iterable[Tuple[float, float, Optional[float]]]) -
 
 
 
-def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
+def _plot_metrics(
+    ax,
+    records: Sequence[RecordPoint],
+    *,
+    lap_intervals: Sequence[tuple[float, float, int]],
+    reference_time: float | None,
+) -> None:
     metrics = [
         ("Power (W)", "power", None),
         ("Cadence (rpm)", "cadence", None),
@@ -104,7 +187,9 @@ def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
 
     has_data = False
     for label, attr, transform in metrics:
-        times, values = _time_series(records, attr, transform=transform)
+        times, values = _time_series(
+            records, attr, transform=transform, reference_time=reference_time
+        )
         if not values:
             continue
         has_data = True
@@ -115,6 +200,7 @@ def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
         ax.set_axis_off()
         return
 
+    _shade_odd_laps(ax, lap_intervals)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Value")
     ax.set_title("Ride metrics")
@@ -122,7 +208,9 @@ def _plot_metrics(ax, records: Sequence[RecordPoint]) -> None:
     ax.grid(True)
 
 
-def _plot_power_components(ax, power_series) -> None:
+def _plot_power_components(
+    ax, power_series, *, lap_intervals: Sequence[tuple[float, float, int]]
+) -> None:
     has_data = False
     for label, key in [
         ("Acceleration power (W)", "acceleration_power"),
@@ -139,6 +227,7 @@ def _plot_power_components(ax, power_series) -> None:
         ax.set_axis_off()
         return
 
+    _shade_odd_laps(ax, lap_intervals)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Power (W)")
     ax.set_title("Mechanical power components")
@@ -152,6 +241,8 @@ def _plot_power_balance_terms(
     eta: float,
     crr: float,
     cda: float,
+    *,
+    lap_intervals: Sequence[tuple[float, float, int]],
     error_message: str | None = None,
 ) -> None:
     if error_message:
@@ -195,6 +286,7 @@ def _plot_power_balance_terms(
         ax.set_axis_off()
         return
 
+    _shade_odd_laps(ax, lap_intervals)
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Power (W)")
     ax.set_title("Power balance components")
@@ -211,6 +303,7 @@ def _plot_residuals(
     eta: float,
     crr: float,
     cda: float,
+    lap_intervals: Sequence[tuple[float, float, int]],
     error_message: str | None = None,
 ) -> None:
     if error_message:
@@ -225,6 +318,7 @@ def _plot_residuals(
 
     times = power_data.timestamps
     marker_style = {"marker": "x", "s": 25, "alpha": 0.9}
+    _shade_odd_laps(ax, lap_intervals)
     if weights is None:
         ax.scatter(
             times,
@@ -347,6 +441,12 @@ def _plot_activity(
     figures: list[tuple[str, plt.Figure]] = []
 
     route_positions = _build_route_positions(data.records)
+    start_timestamp = _first_timestamp(data.records)
+    end_timestamp = _last_timestamp(data.records)
+    reference_time = start_timestamp.timestamp() if start_timestamp else None
+    lap_intervals = _lap_intervals_seconds(
+        data.laps, start_time=start_timestamp, end_time=end_timestamp
+    )
 
     route_fig, route_ax = plt.subplots(figsize=(10, 8))
     route_fig.suptitle(f"GPS Route: {data.source.name}", fontsize=14)
@@ -356,7 +456,12 @@ def _plot_activity(
 
     metrics_fig, metrics_ax = plt.subplots(figsize=(12, 6))
     metrics_fig.suptitle(f"Ride Metrics: {data.source.name}", fontsize=14)
-    _plot_metrics(metrics_ax, data.records)
+    _plot_metrics(
+        metrics_ax,
+        data.records,
+        lap_intervals=lap_intervals,
+        reference_time=reference_time,
+    )
     metrics_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("metrics", metrics_fig))
 
@@ -423,7 +528,7 @@ def _plot_activity(
     power_series = compute_mechanical_power(
         data.records, system_mass_kg, elevation_lag_s=selected_elevation_lag
     )
-    _plot_power_components(power_ax, power_series)
+    _plot_power_components(power_ax, power_series, lap_intervals=lap_intervals)
     power_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
     figures.append(("power", power_fig))
 
@@ -441,6 +546,7 @@ def _plot_activity(
         eta=plot_eta,
         crr=plot_crr,
         cda=plot_cda,
+        lap_intervals=lap_intervals,
         error_message=power_balance_error,
     )
     power_balance_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
@@ -455,6 +561,7 @@ def _plot_activity(
         eta=plot_eta,
         crr=plot_crr,
         cda=plot_cda,
+        lap_intervals=lap_intervals,
         error_message=power_balance_error,
     )
     residual_fig.tight_layout()
