@@ -55,12 +55,21 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--residual-outlier-limit",
+        "--residual-outlier-min",
+        type=float,
+        default=-200.0,
+        help=(
+            "Residual power (W) below which samples are zero-weighted during "
+            "coefficient estimation."
+        ),
+    )
+    parser.add_argument(
+        "--residual-outlier-max",
         type=float,
         default=200.0,
         help=(
-            "Absolute residual magnitude (W) above which samples are zero-weighted "
-            "during coefficient estimation."
+            "Residual power (W) above which samples are zero-weighted during "
+            "coefficient estimation."
         ),
     )
     parser.add_argument(
