@@ -621,7 +621,7 @@ def _plot_activity(
     _plot_speed_power_curves(
         speed_power_ax,
         system_mass_kg=system_mass_kg,
-        gradients_deg=[-3.0, 0.0, 3.0, 6.0],
+        gradients_deg=[-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
         power_range_w=np.linspace(0, 600, 200),
         eta=plot_eta,
         crr=plot_crr,
