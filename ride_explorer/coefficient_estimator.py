@@ -439,7 +439,7 @@ def _estimation_for_lag(
 
     if even_lap_weighting and data.lap_index is not None:
         lap_mask = np.isfinite(data.lap_index)
-        odd_lap_mask = lap_mask & (np.remainder(data.lap_index, 2) == 1)
+        odd_lap_mask = lap_mask & (np.remainder(data.lap_index, 2) == 0)
         base_weights[odd_lap_mask] = 0.0
 
     if weights is not None:
