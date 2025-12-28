@@ -20,6 +20,8 @@ import numpy as np
 from .fit_parser import RecordPoint
 
 GRAVITY_M_PER_S2 = 9.80665
+# Standard sea-level air density used for steady-state speed calculations.
+STANDARD_AIR_DENSITY_KG_PER_M3 = 1.225
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,77 @@ def _time_shift_series(series: DerivedSeries, shift: float) -> DerivedSeries:
         right=series.values[-1],
     )
     return DerivedSeries(times=series.times, values=values)
+
+
+def steady_state_speed(
+    power_w: float,
+    system_mass_kg: float,
+    gradient_radians: float,
+    *,
+    eta: float,
+    crr: float,
+    cda: float,
+    air_density: float = STANDARD_AIR_DENSITY_KG_PER_M3,
+) -> float:
+    """Compute steady-state speed for a given power and road gradient.
+
+    The calculation assumes a balance between rider power (scaled by drivetrain
+    efficiency) and resistive forces from rolling resistance, gravity, and
+    aerodynamic drag. The resulting cubic equation in speed ``v`` is::
+
+        0.5 * rho * CdA * v^3 + m * g * (Crr + sin(theta)) * v - eta * P = 0
+
+    Parameters
+    ----------
+    power_w:
+        Crank power in watts. Non-positive power yields a speed of ``0``.
+    system_mass_kg:
+        Combined rider + bike mass in kilograms; must be positive.
+    gradient_radians:
+        Road gradient in radians (positive for uphill, negative for downhill).
+    eta:
+        Drivetrain efficiency (0–1]; must be positive.
+    crr:
+        Rolling resistance coefficient (unitless); must be non-negative.
+    cda:
+        Aerodynamic drag area in m²; must be non-negative.
+    air_density:
+        Air density in kg/m³ used for the aerodynamic term. Defaults to ISA sea
+        level density (1.225 kg/m³).
+
+    Returns
+    -------
+    float
+        Steady-state speed in meters per second. If the inputs do not permit a
+        positive solution, ``0.0`` is returned.
+    """
+
+    if system_mass_kg <= 0:
+        raise ValueError("system_mass_kg must be positive")
+    if eta <= 0:
+        raise ValueError("eta must be positive")
+    if crr < 0:
+        raise ValueError("crr must be non-negative")
+    if cda < 0:
+        raise ValueError("cda must be non-negative")
+    if air_density <= 0:
+        raise ValueError("air_density must be positive")
+
+    available_power = eta * power_w
+    if available_power <= 0:
+        return 0.0
+
+    linear_term = system_mass_kg * GRAVITY_M_PER_S2 * (crr + np.sin(float(gradient_radians)))
+    cubic_term = 0.5 * air_density * cda
+
+    if cubic_term == 0:
+        return available_power / linear_term if linear_term > 0 else 0.0
+
+    coefficients = [cubic_term, 0.0, linear_term, -available_power]
+    roots = np.roots(coefficients)
+    positive_real = [float(root.real) for root in roots if abs(root.imag) < 1e-9 and root.real > 0]
+
+    return max(positive_real) if positive_real else 0.0
 
 
 def compute_climbing_rate(

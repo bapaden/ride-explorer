@@ -13,7 +13,7 @@ from matplotlib.colors import Normalize
 
 from ride_explorer.arguments import build_argument_parser
 from ride_explorer.coefficient_estimator import PowerBalanceData, estimate_power_balance
-from ride_explorer.derived_metrics import compute_mechanical_power
+from ride_explorer.derived_metrics import compute_mechanical_power, steady_state_speed
 from ride_explorer.fit_parser import CyclingFitData, Lap, RecordPoint, parse_cycling_fit
 
 
@@ -395,6 +395,41 @@ def _plot_residual_histogram(
     ax.grid(True)
 
 
+def _plot_speed_power_curves(
+    ax,
+    *,
+    system_mass_kg: float,
+    gradients_deg: Sequence[float],
+    power_range_w: np.ndarray,
+    eta: float,
+    crr: float,
+    cda: float,
+) -> None:
+    for gradient_deg in gradients_deg:
+        gradient_rad = np.deg2rad(gradient_deg)
+        speeds_m_per_s = np.array(
+            [
+                steady_state_speed(
+                    power,
+                    system_mass_kg,
+                    gradient_rad,
+                    eta=eta,
+                    crr=crr,
+                    cda=cda,
+                )
+                for power in power_range_w
+            ]
+        )
+        speeds_kmh = speeds_m_per_s * 3.6
+        ax.plot(power_range_w, speeds_kmh, label=f"{gradient_deg:g}°")
+
+    ax.set_xlabel("Power (W)")
+    ax.set_ylabel("Speed (km/h)")
+    ax.set_title("Steady-state speed vs. power by gradient")
+    ax.legend(title="Gradient")
+    ax.grid(True)
+
+
 def _build_route_positions(
     records: Sequence[RecordPoint],
 ) -> List[Tuple[float, float, Optional[float]]]:
@@ -581,6 +616,20 @@ def _plot_activity(
     )
     residual_hist_fig.tight_layout()
     figures.append(("residual_histogram", residual_hist_fig))
+
+    speed_power_fig, speed_power_ax = plt.subplots(figsize=(10, 6))
+    _plot_speed_power_curves(
+        speed_power_ax,
+        system_mass_kg=system_mass_kg,
+        gradients_deg=[-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        power_range_w=np.linspace(0, 600, 200),
+        eta=plot_eta,
+        crr=plot_crr,
+        cda=plot_cda,
+    )
+    speed_power_fig.suptitle("Speed vs. Power Curves", fontsize=14)
+    speed_power_fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    figures.append(("speed_power", speed_power_fig))
 
     if output:
         for suffix, fig in figures:
